@@ -107,8 +107,12 @@ class FeatureFilter(BaseProcessor):
         self.reset()
 
         # Deprecation guard for removed parameters
-        _REMOVED = {"skew_threshold", "enable_skew_threshold",
-                    "diff_threshold", "enable_diff_threshold"}
+        _REMOVED = {
+            "skew_threshold",
+            "enable_skew_threshold",
+            "diff_threshold",
+            "enable_diff_threshold",
+        }
         for removed_key in _REMOVED & kwargs.keys():
             warnings.warn(
                 f"Parameter '{removed_key}' was removed in the gate logic refactor. "
@@ -118,9 +122,17 @@ class FeatureFilter(BaseProcessor):
             )
 
         # Use config defaults if not specified
-        bg_thresh = background_threshold if background_threshold is not None else self.config.default_background_threshold
-        high_thresh = high_det_thresh if high_det_thresh is not None else self.config.default_high_det_thresh
-        low_thresh = low_det_thresh if low_det_thresh is not None else self.config.default_low_det_thresh
+        bg_thresh = (
+            background_threshold
+            if background_threshold is not None
+            else self.config.default_background_threshold
+        )
+        high_thresh = (
+            high_det_thresh if high_det_thresh is not None else self.config.default_high_det_thresh
+        )
+        low_thresh = (
+            low_det_thresh if low_det_thresh is not None else self.config.default_low_det_thresh
+        )
         qc_ratio_thresh = (
             qc_ratio_threshold
             if qc_ratio_threshold is not None
@@ -214,7 +226,7 @@ class FeatureFilter(BaseProcessor):
                 success=True,
                 data=result_df,
                 message=f"Feature filtering completed. Kept {filter_stats.get('kept_count', 0)}, "
-                        f"removed {filter_stats.get('deleted_count', 0)} features.",
+                f"removed {filter_stats.get('deleted_count', 0)} features.",
                 statistics=stats,
                 metadata={
                     "group_info": group_info,
@@ -273,10 +285,10 @@ class FeatureFilter(BaseProcessor):
             col_name = df.columns[col_idx]
             sample_type = str(df.iat[sample_type_row, col_idx]).lower().strip()
 
-            if sample_type in ['', 'nan', 'na', 'none']:
+            if sample_type in ["", "nan", "na", "none"]:
                 continue
 
-            if sample_type == 'qc':
+            if sample_type == "qc":
                 info["qc_cols"].append(col_idx)
                 info["has_qc"] = True
             elif sample_type in excluded_types:
@@ -288,6 +300,15 @@ class FeatureFilter(BaseProcessor):
                 info["groups"][sample_type].append(col_idx)
 
         return info
+
+    def count_analysis_groups(self, df: pd.DataFrame) -> int:
+        """Count the number of non-QC analysis groups in df.
+
+        Uses the same group-detection logic as the internal pipeline.
+        Safe to call from external code without depending on private API.
+        """
+        group_info = self._detect_sample_types(df)
+        return len(group_info["groups"])
 
     def _calculate_ratios(
         self,
@@ -346,7 +367,9 @@ class FeatureFilter(BaseProcessor):
                 block = block_all_values[:, pos]
                 signal_count = (block >= signal_threshold).sum(axis=1)
                 total_count = len(pos)
-                qc_ratios = signal_count / total_count if total_count > 0 else np.zeros(len(signal_count))
+                qc_ratios = (
+                    signal_count / total_count if total_count > 0 else np.zeros(len(signal_count))
+                )
                 df[qc_ratio_col] = ["na"] + qc_ratios.tolist()
             else:
                 df[qc_ratio_col] = ["na"] + [0] * (len(df) - 1)
@@ -417,7 +440,9 @@ class FeatureFilter(BaseProcessor):
 
         # QC ratios
         if has_qc and qc_ratio_col:
-            qc_ratio = pd.to_numeric(df[qc_ratio_col].iloc[1:], errors="coerce").fillna(0).to_numpy()
+            qc_ratio = (
+                pd.to_numeric(df[qc_ratio_col].iloc[1:], errors="coerce").fillna(0).to_numpy()
+            )
         else:
             qc_ratio = np.ones(len(df) - 1)
 
@@ -427,7 +452,7 @@ class FeatureFilter(BaseProcessor):
                 protected_mask[idx - 1] = True
 
         if enable_qc_ratio_threshold:
-            qc_zero = (qc_ratio == 0)
+            qc_zero = qc_ratio == 0
             qc_low = (
                 (qc_ratio < qc_ratio_threshold) & (qc_ratio > 0)
                 if has_qc and qc_ratio_threshold > 0
@@ -447,8 +472,8 @@ class FeatureFilter(BaseProcessor):
             # satisfy both conditions, so the "other group" constraint holds.
             # Requires enable_mnar_gate=True and at least 2 groups.
             mnar_keep = (
-                (ratio_matrix >= high_det_thresh).any(axis=1) &
-                (ratio_matrix <= low_det_thresh).any(axis=1)
+                (ratio_matrix >= high_det_thresh).any(axis=1)
+                & (ratio_matrix <= low_det_thresh).any(axis=1)
                 if (enable_mnar_gate and ratio_matrix.shape[1] >= 2)
                 else np.zeros(n_features, dtype=bool)
             )
@@ -513,9 +538,15 @@ class FeatureFilter(BaseProcessor):
         stats["stable_kept"] = int((stable_keep & non_protected).sum())
         stats["mnar_kept"] = int((mnar_keep & non_protected).sum())
         stats["intensity_fc_kept"] = int((intensity_fc_keep & non_protected).sum())
-        stats["unique_stable_kept"] = int((stable_keep & ~mnar_keep & ~intensity_fc_keep & effective).sum())
-        stats["unique_mnar_kept"] = int((mnar_keep & ~stable_keep & ~intensity_fc_keep & effective).sum())
-        stats["unique_intensity_fc_kept"] = int((intensity_fc_keep & ~stable_keep & ~mnar_keep & effective).sum())
+        stats["unique_stable_kept"] = int(
+            (stable_keep & ~mnar_keep & ~intensity_fc_keep & effective).sum()
+        )
+        stats["unique_mnar_kept"] = int(
+            (mnar_keep & ~stable_keep & ~intensity_fc_keep & effective).sum()
+        )
+        stats["unique_intensity_fc_kept"] = int(
+            (intensity_fc_keep & ~stable_keep & ~mnar_keep & effective).sum()
+        )
         stats["qc_zero_deleted"] = int((qc_zero & non_protected & ~mnar_keep).sum())
         stats["qc_low_deleted"] = int((qc_low & non_protected & ~mnar_keep).sum())
 
