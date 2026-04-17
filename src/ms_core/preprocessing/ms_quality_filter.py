@@ -33,6 +33,8 @@ class FeatureFilter(BaseProcessor):
     4. Removes features with QC_ratio = 0 or below threshold
     """
 
+    _SMALL_N_THRESHOLD: int = 10
+
     def __init__(self, config: Optional[FeatureFilterConfig] = None):
         """
         Initialize the Feature Filter.
@@ -220,6 +222,8 @@ class FeatureFilter(BaseProcessor):
                 "final_features": len(result_df) - 1,
                 "groups_detected": len(group_info["groups"]),
                 "has_qc": group_info["has_qc"],
+                "qc_count": len(group_info.get("qc_cols", [])),
+                "group_counts": {gname: len(cols) for gname, cols in group_info["groups"].items()},
             }
 
             return ProcessingResult(
@@ -466,13 +470,28 @@ class FeatureFilter(BaseProcessor):
 
         # --- Ratio-based gates ---
         if ratio_matrix.shape[1] > 0:
+            # Wilson CI correction for small biological groups (N < 10).
+            # For groups with fewer than 10 samples, replace the raw observed
+            # proportion with the 95% Wilson CI lower bound before applying
+            # any threshold comparison.  This prevents unreliable high
+            # proportions (e.g. 4/5 = 80%) from passing thresholds when
+            # the sample count is too small to trust the point estimate.
+            # N >= 10 groups use the raw ratio unchanged.
+            effective_matrix = ratio_matrix.copy()
+            for j, gname in enumerate(group_names):
+                n_g = len(group_info["groups"][gname])
+                if n_g < self._SMALL_N_THRESHOLD:
+                    effective_matrix[:, j] = self._wilson_lower_vec(ratio_matrix[:, j], n_g)
+
             # MNAR 80/20 gate: at least one group >= high_det_thresh AND
             # at least one other group <= low_det_thresh.
             # Because high_det_thresh > low_det_thresh, a single value cannot
             # satisfy both conditions, so the "other group" constraint holds.
             # Requires enable_mnar_gate=True and at least 2 groups.
+            # High side uses effective_matrix (Wilson-corrected); low side
+            # uses raw ratio_matrix (absence signal should not be inflated).
             mnar_keep = (
-                (ratio_matrix >= high_det_thresh).any(axis=1)
+                (effective_matrix >= high_det_thresh).any(axis=1)
                 & (ratio_matrix <= low_det_thresh).any(axis=1)
                 if (enable_mnar_gate and ratio_matrix.shape[1] >= 2)
                 else np.zeros(n_features, dtype=bool)
@@ -482,7 +501,7 @@ class FeatureFilter(BaseProcessor):
                 # Degrade to single-group check when exactly 1 group and
                 # the caller has confirmed this intentional fallback.
                 required_groups = 1 if (allow_single_group_stable and n_groups == 1) else 2
-                stable_keep = (ratio_matrix >= bg_threshold).sum(axis=1) >= required_groups
+                stable_keep = (effective_matrix >= bg_threshold).sum(axis=1) >= required_groups
             else:
                 stable_keep = np.zeros(n_features, dtype=bool)
         else:
@@ -578,6 +597,26 @@ class FeatureFilter(BaseProcessor):
         result_df.insert(len(result_df.columns), "is_Presence_Absence_Marker", mnar_col)
 
         return result_df, deleted_features, stats
+
+    @staticmethod
+    def _wilson_lower_vec(p: np.ndarray, n: int, z: float = 1.96) -> np.ndarray:
+        """Return the 95% Wilson CI lower bound for each proportion in *p*.
+
+        Args:
+            p: Array of observed proportions in [0, 1].
+            n: Sample size (integer).  When 0, returns an all-zero array.
+            z: Z-score for the desired confidence level (default 1.96 → 95%).
+
+        Returns:
+            Array of lower-bound proportions, clipped to [0, 1].
+        """
+        if n == 0:
+            return np.zeros_like(p, dtype=float)
+        z2 = z * z
+        n_f = float(n)
+        numerator = p + z2 / (2 * n_f) - z * np.sqrt(p * (1 - p) / n_f + z2 / (4 * n_f * n_f))
+        denominator = 1.0 + z2 / n_f
+        return np.clip(numerator / denominator, 0.0, 1.0)
 
     def _get_max_ratio_diff(self, ratios: List[float]) -> float:
         """Calculate maximum difference between any two ratios."""
