@@ -1048,6 +1048,9 @@ class DataOrganizer(BaseProcessor):
                     override_by_key[normalized_col_key] = normalized
 
         for col in df.columns[num_fixed:]:
+            if self._is_non_sample_column(str(col)):
+                sample_types.append("na")
+                continue
             sample_type = override_exact.get(str(col))
             if sample_type is None:
                 col_key = self._normalize_sample_key(str(col))
