@@ -66,7 +66,7 @@ class DataOrganizer(BaseProcessor):
         "QC": [r"qc", r"pool", r"quality"],
         "Exposure": [r"tumor", r"cancer", r"tumour"],  # Tumor -> Exposure
         "Normal": [r"normal", r"healthy"],
-        "Control": [r"benign", r"benignfat"],  # Benign -> Control
+        "Control": [r"benign", r"benignfat", r"control"],  # Benign/control -> Control
         "blank": [r"blank", r"blk"],
         "standard": [r"std", r"standard", r"sdolek"],
     }
@@ -312,6 +312,39 @@ class DataOrganizer(BaseProcessor):
             or "pooled" in name_lower
         )
 
+    def _move_leading_metadata_to_end(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Move any leading non-mz/rt metadata columns (e.g. MZmine ID) to the end.
+
+        MZmine's default export puts the ID column first.  Relocating it lets
+        validate_input and _merge_mz_rt find m/z and RT in the expected positions
+        without requiring manual column reordering by the user.
+        """
+        if df.empty or len(df.columns) < 3:
+            return df
+
+        def _looks_like_mz_or_rt(col_lower: str) -> bool:
+            return bool(
+                "m/z" in col_lower
+                or re.search(r"\bmz\b", col_lower)
+                or re.search(r"\bmass\b", col_lower)
+                or re.search(r"\brt\b", col_lower)
+                or "retention" in col_lower
+            )
+
+        leading_meta: list = []
+        for col in df.columns:
+            col_lower = str(col).strip().lower()
+            if _looks_like_mz_or_rt(col_lower):
+                break
+            if self._is_non_sample_column(str(col)):
+                leading_meta.append(col)
+            else:
+                break
+        if not leading_meta:
+            return df
+        rest = [c for c in df.columns if c not in leading_meta]
+        return df[rest + leading_meta]
+
     def validate_input(self, df: pd.DataFrame) -> tuple:
         """
         Validate input data for organization.
@@ -379,12 +412,19 @@ class DataOrganizer(BaseProcessor):
         self.reset()
 
         mode_name = str(mode or "normalization").strip().lower()
-        if mode_name not in {"normalization", "statistics"}:
+        if mode_name not in {"normalization", "statistics", "combined", "combined_fix"}:
             return ProcessingResult(
                 success=False,
                 errors=[f"Unsupported mode: {mode}"],
                 message=f"Unsupported mode: {mode}",
             )
+
+        # Auto-detect combined TSV: MZmine ID found in the middle of the columns
+        # (split_idx > 2 rules out standalone MZmine files where it sits at col 0)
+        if mode_name in {"normalization", "statistics"}:
+            _split = self._detect_combined_split(df)
+            if _split is not None and 2 < _split < len(df.columns) - 1:
+                mode_name = "combined_fix"
 
         if mode_name == "statistics":
             return self._process_statistics_mode(
@@ -394,6 +434,26 @@ class DataOrganizer(BaseProcessor):
                 rt_decimals=rt_decimals,
                 sample_type_mapping=sample_type_mapping,
             )
+
+        if mode_name == "combined_fix":
+            return self.process_combined_and_fix(
+                df=df,
+                method_file=method_file,
+                mz_decimals=mz_decimals,
+                rt_decimals=rt_decimals,
+                sample_type_mapping=sample_type_mapping,
+            )
+
+        if mode_name == "combined":
+            return self.process_combined(
+                df=df,
+                method_file=method_file,
+                mz_decimals=mz_decimals,
+                rt_decimals=rt_decimals,
+                sample_type_mapping=sample_type_mapping,
+            )
+
+        df = self._move_leading_metadata_to_end(df)
 
         # Validate input
         is_valid, error_msg = self.validate_input(df)
@@ -544,6 +604,8 @@ class DataOrganizer(BaseProcessor):
         - Keep separate Mz and RT output columns (no merged Mz/RT in final output)
         - Otherwise follow normalization workflow
         """
+        df = self._move_leading_metadata_to_end(df)
+
         is_valid, error_msg = self.validate_input(df)
         if not is_valid:
             return ProcessingResult(
@@ -698,6 +760,285 @@ class DataOrganizer(BaseProcessor):
                 errors=[str(e)],
                 message=f"Error during statistics mode: {str(e)}",
             )
+
+    def _detect_combined_split(self, df: pd.DataFrame) -> Optional[int]:
+        """Return the column index of the MZmine ID column that marks the FH/MZmine split.
+
+        Returns None when no such column is found (input is not a combined TSV).
+        """
+        for idx, col in enumerate(df.columns):
+            compact = re.sub(r"[^a-z0-9]+", "", str(col).strip().lower())
+            if compact == "mzmineid":
+                return idx
+        return None
+
+    def process_combined(
+        self,
+        df: pd.DataFrame,
+        method_file: Optional[Union[str, Path]] = None,
+        mz_decimals: int = 4,
+        rt_decimals: int = 2,
+        sample_type_mapping: Optional[Dict[str, str]] = None,
+    ) -> ProcessingResult:
+        """Process a combined FH+MZmine TSV directly into beforeVBA format.
+
+        Splits the DataFrame at the MZmine ID column, processes each half
+        independently in statistics mode (preserving separate Mz/RT columns,
+        applying injection-order reordering via the method file), then
+        concatenates the two processed halves horizontally.
+
+        The result replicates the manual workflow: run Step-1 statistics mode
+        on each side separately, then paste them side-by-side.
+        """
+        split_idx = self._detect_combined_split(df)
+        if split_idx is None:
+            return ProcessingResult(
+                success=False,
+                errors=["No 'MZmine ID' column found — cannot identify FH/MZmine boundary"],
+                message="Combined mode requires a 'MZmine ID' split column in the input",
+            )
+
+        fh_df = df.iloc[:, :split_idx].copy().reset_index(drop=True)
+        mz_df = df.iloc[:, split_idx:].copy().reset_index(drop=True)
+
+        # Drop trailing all-NaN unnamed columns exported by MZmine
+        valid_mz_cols = [
+            c
+            for c in mz_df.columns
+            if not (str(c).startswith("Unnamed:") and mz_df[c].isna().all())
+        ]
+        mz_df = mz_df[valid_mz_cols]
+
+        fh_result = self._process_statistics_mode(
+            df=fh_df,
+            method_file=method_file,
+            mz_decimals=mz_decimals,
+            rt_decimals=rt_decimals,
+            sample_type_mapping=sample_type_mapping,
+        )
+        if not fh_result.success:
+            return ProcessingResult(
+                success=False,
+                errors=fh_result.errors,
+                message=f"FH side processing failed: {fh_result.message}",
+            )
+
+        mz_result = self._process_statistics_mode(
+            df=mz_df,
+            method_file=method_file,
+            mz_decimals=mz_decimals,
+            rt_decimals=rt_decimals,
+            sample_type_mapping=sample_type_mapping,
+        )
+        if not mz_result.success:
+            return ProcessingResult(
+                success=False,
+                errors=mz_result.errors,
+                message=f"MZmine side processing failed: {mz_result.message}",
+            )
+
+        fh_data = fh_result.data.reset_index(drop=True)
+        mz_data = mz_result.data.reset_index(drop=True)
+
+        # _move_leading_metadata_to_end relocated MZmine ID to the tail of mz_data.
+        # The VBA expects layout: FH_Mz|FH_RT|FH_samples|MZmine_ID|MZmine_mz|MZmine_RT|MZmine_area
+        # Restore that order by moving MZmine ID back to the front of the MZmine side.
+        is_mzmine_id = [
+            re.sub(r"[^a-z0-9]+", "", str(c).strip().lower()) == "mzmineid" for c in mz_data.columns
+        ]
+        id_cols = [c for c, flag in zip(mz_data.columns, is_mzmine_id) if flag]
+        other_cols = [c for c, flag in zip(mz_data.columns, is_mzmine_id) if not flag]
+        mz_data = mz_data[id_cols + other_cols]
+
+        combined = pd.concat([fh_data, mz_data], axis=1)
+
+        return ProcessingResult(
+            success=True,
+            data=combined,
+            message="Combined mode completed.",
+            statistics={
+                "mode": "combined",
+                "fh_cols": len(fh_data.columns),
+                "mz_cols": len(mz_data.columns),
+                "total_cols": len(combined.columns),
+                "total_rows": len(combined),
+            },
+            metadata={
+                "mode": "combined",
+                "fh_metadata": fh_result.metadata,
+                "mz_metadata": mz_result.metadata,
+                "sample_info": fh_result.metadata.get("sample_info")
+                if fh_result.metadata
+                else None,
+            },
+        )
+
+    @staticmethod
+    def post_vba_cleanup(df: pd.DataFrame) -> pd.DataFrame:
+        """Replace FH Mz/RT with MZmine values and drop the MZmine side.
+
+        Call this after running the VBA macro (false_positive_fix_v2.bas) and
+        saving the result back to a file readable by pandas.  Automates the two
+        remaining manual steps:
+          1. Replace column 0 (FH Mz) with the MZmine m/z values.
+          2. Replace column 1 (FH RT) with the MZmine RT values.
+          3. Drop the MZmine ID, m/z, RT, and area columns.
+
+        The MZmine ID column position is auto-detected, so n (sample count) does
+        not need to be supplied manually.
+        """
+        mzmine_id_idx: Optional[int] = None
+        for idx, col in enumerate(df.columns):
+            if re.sub(r"[^a-z0-9]+", "", str(col).strip().lower()) == "mzmineid":
+                mzmine_id_idx = idx
+                break
+
+        if mzmine_id_idx is None:
+            raise ValueError(
+                "MZmine ID column not found — is this a beforeVBA/afterVBA format file?"
+            )
+
+        mzmine_mz_idx = mzmine_id_idx + 1
+        mzmine_rt_idx = mzmine_id_idx + 2
+
+        if mzmine_rt_idx >= len(df.columns):
+            raise ValueError(
+                "Expected MZmine m/z and RT columns immediately after MZmine ID column"
+            )
+
+        result = df.copy()
+        result.iloc[:, 0] = result.iloc[:, mzmine_mz_idx]
+        result.iloc[:, 1] = result.iloc[:, mzmine_rt_idx]
+        return result.iloc[:, :mzmine_id_idx]
+
+    def false_positive_fix(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply MZmine false-positive filtering to a beforeVBA format DataFrame.
+
+        Replicates the logic of false_positive_fix_v2.bas without requiring Excel:
+        1. Remove features (rows) where MZmine ID, m/z, or RT is absent/NA.
+        2. For each FH sample column: where the FH value is present, replace it
+           with the corresponding MZmine area value; where FH is absent (NA),
+           leave the cell as NaN.
+        3. Replace the FH Mz (col 0) and FH RT (col 1) with MZmine m/z / RT.
+        4. Drop the MZmine side entirely (MZmine ID, m/z, RT, area columns).
+
+        The Sample_Type row (if present as row 0) is removed as part of step 1
+        because its MZmine ID value is "na", which satisfies the missing-value check.
+        """
+        mzmine_id_idx: Optional[int] = None
+        for idx, col in enumerate(df.columns):
+            if re.sub(r"[^a-z0-9]+", "", str(col).strip().lower()) == "mzmineid":
+                mzmine_id_idx = idx
+                break
+
+        if mzmine_id_idx is None:
+            raise ValueError("MZmine ID column not found — expected beforeVBA format input")
+
+        mzmine_mz_idx = mzmine_id_idx + 1
+        mzmine_rt_idx = mzmine_id_idx + 2
+        mzmine_area_start = mzmine_id_idx + 3
+        n_fh = mzmine_id_idx - 2  # number of FH sample columns
+
+        def _is_missing(v: Any) -> bool:
+            if pd.isna(v):
+                return True
+            return str(v).strip().upper() in ("", "NA", "NAN")
+
+        result = df.copy()
+
+        # STEP 1: drop rows where MZmine identity is absent (includes Sample_Type row)
+        keep = ~(
+            result.iloc[:, mzmine_id_idx].map(_is_missing)
+            | result.iloc[:, mzmine_mz_idx].map(_is_missing)
+            | result.iloc[:, mzmine_rt_idx].map(_is_missing)
+        )
+        result = result.loc[keep].reset_index(drop=True)
+
+        # STEP 2: replace FH area with MZmine area where FH is non-NA.
+        # Build name→position map for MZmine area columns using the ORIGINAL df indices
+        # (positions stay valid after row-filtering because only rows, not columns, are dropped).
+        # Must use .iloc[:, pos] rather than df[name] because FH and MZmine columns share
+        # the same simplified names after header processing, causing duplicates that make
+        # df[name] return a DataFrame instead of a Series.
+        mzmine_area_name_to_pos: Dict[str, int] = {}
+        for i in range(mzmine_area_start, len(df.columns)):
+            name = str(df.columns[i])
+            if name not in mzmine_area_name_to_pos:
+                mzmine_area_name_to_pos[name] = i
+
+        for fh_pos in range(2, mzmine_id_idx):
+            fh_col_name = str(result.columns[fh_pos])
+            area_pos = mzmine_area_name_to_pos.get(fh_col_name)
+            if area_pos is None:
+                continue
+            fh_vals = result.iloc[:, fh_pos]
+            area_vals = result.iloc[:, area_pos]
+            fh_present = ~fh_vals.map(_is_missing)
+            merged = fh_vals.copy()
+            merged.loc[fh_present] = area_vals.loc[fh_present]
+            result.iloc[:, fh_pos] = merged
+
+        # STEP 3: replace FH Mz/RT with MZmine m/z/RT
+        result.iloc[:, 0] = result.iloc[:, mzmine_mz_idx].to_numpy()
+        result.iloc[:, 1] = result.iloc[:, mzmine_rt_idx].to_numpy()
+
+        # STEP 4: drop MZmine side
+        return result.iloc[:, :mzmine_id_idx].copy()
+
+    def process_combined_and_fix(
+        self,
+        df: pd.DataFrame,
+        method_file: Optional[Union[str, Path]] = None,
+        mz_decimals: int = 4,
+        rt_decimals: int = 2,
+        sample_type_mapping: Optional[Dict[str, str]] = None,
+    ) -> ProcessingResult:
+        """Full end-to-end MZmine pipeline: combined TSV → final output.
+
+        Equivalent to the entire manual workflow:
+        combined TSV → beforeVBA (process_combined) → false_positive_fix (VBA replacement)
+
+        Output has:
+        - MZmine m/z and RT as Mz/RT columns
+        - FH areas replaced by MZmine peak areas where FH detected the feature
+        - Only features found by both FH and MZmine
+        """
+        combined_result = self.process_combined(
+            df=df,
+            method_file=method_file,
+            mz_decimals=mz_decimals,
+            rt_decimals=rt_decimals,
+            sample_type_mapping=sample_type_mapping,
+        )
+        if not combined_result.success:
+            return combined_result
+
+        try:
+            final_df = self.false_positive_fix(combined_result.data)
+        except Exception as exc:
+            return ProcessingResult(
+                success=False,
+                errors=[str(exc)],
+                message=f"False-positive fix failed: {exc}",
+            )
+
+        input_rows = len(combined_result.data) - 1  # minus Sample_Type row
+        return ProcessingResult(
+            success=True,
+            data=final_df,
+            message=f"Combined pipeline completed. {input_rows - len(final_df)} features removed.",
+            statistics={
+                "mode": "combined_fix",
+                "input_features": input_rows,
+                "output_features": len(final_df),
+                "removed_features": input_rows - len(final_df),
+                "output_cols": len(final_df.columns),
+            },
+            metadata={
+                **(combined_result.metadata or {}),
+                "mode": "combined_fix",
+            },
+        )
 
     def _validate_statistics_input(self, df: pd.DataFrame) -> Tuple[bool, str]:
         """Validate input data for statistics mode."""
@@ -911,15 +1252,22 @@ class DataOrganizer(BaseProcessor):
 
         mz_np = mz_series.to_numpy()
         rt_np = rt_series.to_numpy()
-        mz_str = np.char.mod(f"%.{mz_decimals}f", mz_np)
-        rt_str = np.char.mod(f"%.{rt_decimals}f", rt_np)
-        merged = np.char.add(np.char.add(mz_str, "/"), rt_str)
+        # Use pandas string ops to stay NumPy-version-agnostic (np.char.add/mod
+        # dropped object-dtype support in NumPy 2.x).
+        fmt_mz = f"%.{mz_decimals}f"
+        fmt_rt = f"%.{rt_decimals}f"
+        mz_str_list = [fmt_mz % v if not np.isnan(v) else "nan" for v in mz_np]
+        rt_str_list = [fmt_rt % v if not np.isnan(v) else "nan" for v in rt_np]
+        merged_list = [f"{m}/{r}" for m, r in zip(mz_str_list, rt_str_list)]
 
         # Fallback to original strings for invalid rows
-        orig_mz = df.iloc[:, 0].astype(str).to_numpy()
-        orig_rt = df.iloc[:, 1].astype(str).to_numpy()
-        fallback = np.char.add(np.char.add(orig_mz, "/"), orig_rt)
-        mz_rt_values = np.where(valid_mask.to_numpy(), merged, fallback).tolist()
+        orig_mz = df.iloc[:, 0].astype(str).tolist()
+        orig_rt = df.iloc[:, 1].astype(str).tolist()
+        fallback_list = [f"{m}/{r}" for m, r in zip(orig_mz, orig_rt)]
+        valid_arr = valid_mask.to_numpy()
+        mz_rt_values = [
+            merged_list[i] if valid_arr[i] else fallback_list[i] for i in range(len(valid_arr))
+        ]
 
         stats["mz_rt_merged"] = int(valid_mask.sum())
         stats["invalid_values"] = int(len(df) - valid_mask.sum())
@@ -994,6 +1342,7 @@ class DataOrganizer(BaseProcessor):
         # Pattern: program2_program1_SAMPLENAME.tsv -> SAMPLENAME
         # Pattern: program2_1\\program2_program1_SAMPLENAME -> SAMPLENAME
         patterns_to_remove = [
+            r"^.+_program\d+_",  # YYYYMMDD_desc_program2_YYYYMMDD_desc_program1_SAMPLE
             r"^program\d+_(?:dna|rna)_program\d+_",  # program2_DNA_program1_
             r"^(?:dna|rna)_program\d+_",  # DNA_program1_, RNA_program1_
             r"^program\d+_program\d+_",  # program2_program1_
@@ -1047,6 +1396,9 @@ class DataOrganizer(BaseProcessor):
                     override_by_key[normalized_col_key] = normalized
 
         for col in df.columns[num_fixed:]:
+            if self._is_non_sample_column(str(col)):
+                sample_types.append("na")
+                continue
             sample_type = override_exact.get(str(col))
             if sample_type is None:
                 col_key = self._normalize_sample_key(str(col))
