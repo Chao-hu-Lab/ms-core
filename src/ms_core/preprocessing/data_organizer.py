@@ -41,6 +41,7 @@ from ms_core.utils.validators import detect_fixed_columns
 @dataclass
 class InjectionInfo:
     """Information about a sample injection from method file."""
+
     injection_order: int
     file_name: str
     sample_name: str
@@ -93,9 +94,7 @@ class DataOrganizer(BaseProcessor):
         normalized = re.sub(r"[\s_]", "", col_name.lower())
         return normalized in {"mz/rt", "m/z/rt", "mzrt"}
 
-    def _expand_pre_merged_mz_rt(
-        self, df: pd.DataFrame
-    ) -> Tuple[pd.DataFrame, bool]:
+    def _expand_pre_merged_mz_rt(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
         """Expand an already-combined Mz/RT column into separate numeric Mz and RT columns.
 
         If the first column is a combined "Mz/RT" column (e.g., "274.0920/18.32"),
@@ -240,7 +239,11 @@ class DataOrganizer(BaseProcessor):
             ):
                 return cleaned
             # Column-style names such as DNA_program1_TumorBC2257_DNA.
-            if re.search(r"\b(?:dna_)?program\d+_[a-z0-9_]*bc\d+_(?:dnaandrna|dna|rna)\b", cleaned, re.IGNORECASE):
+            if re.search(
+                r"\b(?:dna_)?program\d+_[a-z0-9_]*bc\d+_(?:dnaandrna|dna|rna)\b",
+                cleaned,
+                re.IGNORECASE,
+            ):
                 return cleaned
             return None
         token = re.sub(r"\s+", "", match.group(0))
@@ -258,6 +261,8 @@ class DataOrganizer(BaseProcessor):
         lower = token.lower()
         lower = re.sub(r"[^a-z0-9]+", "_", lower).strip("_")
         lower = re.sub(r"_+", "_", lower)
+        # Strip 14-digit datetime stamps appended by instrument software (YYYYMMDDHHMMSS).
+        lower = re.sub(r"_\d{14}$", "", lower)
 
         # Normalize QC naming variants.
         lower = re.sub(r"qc[_\s-]*sample[_\s-]*(\d+)", r"qc_sample_\1", lower)
@@ -332,7 +337,10 @@ class DataOrganizer(BaseProcessor):
 
         # Standard MZmine export: separate Mz and RT columns required.
         if len(df.columns) < 3:
-            return False, "Input data must have at least 3 columns (Mz, RT, and at least one sample)"
+            return (
+                False,
+                "Input data must have at least 3 columns (Mz, RT, and at least one sample)",
+            )
 
         second_col = str(df.columns[1]).lower()
 
@@ -405,7 +413,9 @@ class DataOrganizer(BaseProcessor):
                 "original_rows": len(df),
                 "original_cols": len(df.columns),
             }
-            result_df, input_sample_types, input_type_stats = self._extract_sample_type_row_from_input(result_df)
+            result_df, input_sample_types, input_type_stats = (
+                self._extract_sample_type_row_from_input(result_df)
+            )
             stats.update(input_type_stats)
 
             # Expand pre-merged Mz/RT column into separate numeric Mz and RT columns
@@ -446,9 +456,15 @@ class DataOrganizer(BaseProcessor):
             input_sample_types_simplified: Dict[str, str] = {}
             if input_sample_types:
                 for raw_col, sample_type in input_sample_types.items():
-                    simplified = header_mapping.get(raw_col, self._extract_sample_name(str(raw_col)))
+                    simplified = header_mapping.get(
+                        raw_col, self._extract_sample_name(str(raw_col))
+                    )
                     normalized = self._normalize_sample_type_value(sample_type)
-                    if simplified and normalized and simplified not in input_sample_types_simplified:
+                    if (
+                        simplified
+                        and normalized
+                        and simplified not in input_sample_types_simplified
+                    ):
                         input_sample_types_simplified[simplified] = normalized
 
             if self._cancelled:
@@ -469,9 +485,7 @@ class DataOrganizer(BaseProcessor):
 
             # Step 5: Build SampleInfo DataFrame
             self.update_progress(70, "Building SampleInfo...")
-            sample_info_df = self._build_sample_info(
-                result_df, injection_info_list
-            )
+            sample_info_df = self._build_sample_info(result_df, injection_info_list)
             stats["sample_info_rows"] = len(sample_info_df)
 
             if self._cancelled:
@@ -547,7 +561,9 @@ class DataOrganizer(BaseProcessor):
                 "original_rows": len(df),
                 "original_cols": len(df.columns),
             }
-            result_df, input_sample_types, input_type_stats = self._extract_sample_type_row_from_input(result_df)
+            result_df, input_sample_types, input_type_stats = (
+                self._extract_sample_type_row_from_input(result_df)
+            )
             stats.update(input_type_stats)
 
             # Expand pre-merged Mz/RT column into separate numeric Mz and RT columns
@@ -596,9 +612,15 @@ class DataOrganizer(BaseProcessor):
             input_sample_types_simplified: Dict[str, str] = {}
             if input_sample_types:
                 for raw_col, sample_type in input_sample_types.items():
-                    simplified = header_mapping.get(raw_col, self._extract_sample_name(str(raw_col)))
+                    simplified = header_mapping.get(
+                        raw_col, self._extract_sample_name(str(raw_col))
+                    )
                     normalized = self._normalize_sample_type_value(sample_type)
-                    if simplified and normalized and simplified not in input_sample_types_simplified:
+                    if (
+                        simplified
+                        and normalized
+                        and simplified not in input_sample_types_simplified
+                    ):
                         input_sample_types_simplified[simplified] = normalized
 
             if self._cancelled:
@@ -619,9 +641,7 @@ class DataOrganizer(BaseProcessor):
 
             # Step 5: Build SampleInfo DataFrame
             self.update_progress(70, "Building SampleInfo...")
-            sample_info_df = self._build_sample_info(
-                result_df, injection_info_list
-            )
+            sample_info_df = self._build_sample_info(result_df, injection_info_list)
             stats["sample_info_rows"] = len(sample_info_df)
 
             if self._cancelled:
@@ -692,8 +712,9 @@ class DataOrganizer(BaseProcessor):
 
         first_col = str(df.columns[0]).lower()
         second_col = str(df.columns[1]).lower()
-        if (("mz" in first_col or "m/z" in first_col or "mass" in first_col)
-                and ("rt" in second_col or "time" in second_col or "retention" in second_col)):
+        if ("mz" in first_col or "m/z" in first_col or "mass" in first_col) and (
+            "rt" in second_col or "time" in second_col or "retention" in second_col
+        ):
             return True, ""
 
         return False, (
@@ -732,11 +753,13 @@ class DataOrganizer(BaseProcessor):
         fixed_cols, num_fixed = self._detect_fixed_columns_for_statistics(df)
         fixed_positions = list(range(num_fixed))
         sample_positions = [
-            idx for idx in range(num_fixed, len(df.columns))
+            idx
+            for idx in range(num_fixed, len(df.columns))
             if not self._is_non_sample_column(str(df.columns[idx]))
         ]
         metadata_positions = [
-            idx for idx in range(num_fixed, len(df.columns))
+            idx
+            for idx in range(num_fixed, len(df.columns))
             if self._is_non_sample_column(str(df.columns[idx]))
         ]
 
@@ -825,7 +848,9 @@ class DataOrganizer(BaseProcessor):
                 return pos
 
             bc_match_col = re.search(r"(tumor|normal|benign|benignfat)?(bc\d+)", col_key)
-            bc_match_file = re.search(r"(tumor|normal|benign)\s*(tissue)?\s*(fat\s*)?(bc\d+)", file_lower)
+            bc_match_file = re.search(
+                r"(tumor|normal|benign)\s*(tissue)?\s*(fat\s*)?(bc\d+)", file_lower
+            )
             if bc_match_col and bc_match_file:
                 col_prefix = bc_match_col.group(1) or ""
                 if "benign" in col_prefix:
@@ -849,7 +874,11 @@ class DataOrganizer(BaseProcessor):
 
             col_token = sanitize(col_key)
             file_token = sanitize(file_simplified)
-            if col_token and file_token and (col_token == file_token or col_token in file_token or file_token in col_token):
+            if (
+                col_token
+                and file_token
+                and (col_token == file_token or col_token in file_token or file_token in col_token)
+            ):
                 return pos
 
             if file_simplified and (file_simplified in col_lower or col_lower in file_simplified):
@@ -1183,12 +1212,12 @@ class DataOrganizer(BaseProcessor):
                     continue
 
                 sample_cell = cells[sample_idx]
-                sample_token = self._extract_primary_sample_token(sample_cell)
-                if not sample_token:
-                    continue
                 sample_text = re.sub(r"\s+", " ", sample_cell).strip()
                 if not sample_text:
-                    sample_text = sample_token
+                    continue
+                sample_token = self._extract_primary_sample_token(sample_cell)
+                if not sample_token and not self._is_likely_sample_name(sample_cell):
+                    continue
 
                 instrument_method = ""
                 next_col = sample_idx + 1
@@ -1261,6 +1290,7 @@ class DataOrganizer(BaseProcessor):
         tables: List[List[List[str]]] = []
         try:
             from docx import Document
+
             doc = Document(file_path)
             for table in doc.tables:
                 table_rows: List[List[str]] = []
@@ -1269,10 +1299,14 @@ class DataOrganizer(BaseProcessor):
                 if table_rows:
                     tables.append(table_rows)
         except ImportError:
-            logger.warning("python-docx not installed; using fallback DOCX parser for injection sequence")
+            logger.warning(
+                "python-docx not installed; using fallback DOCX parser for injection sequence"
+            )
             tables = self._extract_docx_tables_fallback(file_path)
         except Exception as exc:
-            logger.warning("python-docx parse failed for %s (%s); using fallback parser", file_path, exc)
+            logger.warning(
+                "python-docx parse failed for %s (%s); using fallback parser", file_path, exc
+            )
             tables = self._extract_docx_tables_fallback(file_path)
 
         # Find the injection sequence table
@@ -1300,7 +1334,8 @@ class DataOrganizer(BaseProcessor):
                 order_values = [info.injection_order for info in parsed_from_target]
                 duplicate_orders = len(order_values) - len(set(order_values))
                 bc_like_count = sum(
-                    1 for info in parsed_from_target
+                    1
+                    for info in parsed_from_target
                     if re.search(r"bc\d+", info.file_name, re.IGNORECASE)
                 )
                 if duplicate_orders > 0 and bc_like_count >= 5:
@@ -1479,7 +1514,9 @@ class DataOrganizer(BaseProcessor):
                 self._normalize_sample_key(info.file_name),
                 self._normalize_sample_key(info.sample_name),
                 self._normalize_sample_key(self._simplify_word_sample_name(info.file_name)),
-                self._normalize_sample_key(self._extract_primary_sample_token(info.file_name) or ""),
+                self._normalize_sample_key(
+                    self._extract_primary_sample_token(info.file_name) or ""
+                ),
             }
             for key in keys:
                 if key and key not in info_by_key:
@@ -1521,7 +1558,9 @@ class DataOrganizer(BaseProcessor):
 
                     # Match by BC ID with type prefix and variant (DNA/RNA/DNAandRNA)
                     bc_match_col = re.search(r"(tumor|normal|benign|benignfat)?(bc\d+)", col_lower)
-                    bc_match_file = re.search(r"(tumor|normal|benign)\s*(tissue)?\s*(fat\s*)?(bc\d+)", file_lower)
+                    bc_match_file = re.search(
+                        r"(tumor|normal|benign)\s*(tissue)?\s*(fat\s*)?(bc\d+)", file_lower
+                    )
 
                     if bc_match_col and bc_match_file:
                         col_prefix = bc_match_col.group(1) or ""
@@ -1536,7 +1575,11 @@ class DataOrganizer(BaseProcessor):
                         if "benign" in col_prefix:
                             col_prefix = "benign"
 
-                        if col_id == file_id and col_prefix == file_prefix and col_variant == file_variant:
+                        if (
+                            col_id == file_id
+                            and col_prefix == file_prefix
+                            and col_variant == file_variant
+                        ):
                             matched_info = info
                             break
 
@@ -1553,13 +1596,15 @@ class DataOrganizer(BaseProcessor):
             # Get sample type from the Sample_Type row
             sample_type = sample_type_row.get(col, "sample")
 
-            sample_info_data.append({
-                "Sample_Name": matched_info.file_name if matched_info else col,
-                "Sample_Type": sample_type,
-                "Injection_Order": matched_info.injection_order if matched_info else 999,
-                "Injection_Volume": matched_info.injection_volume if matched_info else 0,
-                "_col_name": col,  # Internal: for column reordering
-            })
+            sample_info_data.append(
+                {
+                    "Sample_Name": matched_info.file_name if matched_info else col,
+                    "Sample_Type": sample_type,
+                    "Injection_Order": matched_info.injection_order if matched_info else 999,
+                    "Injection_Volume": matched_info.injection_volume if matched_info else 0,
+                    "_col_name": col,  # Internal: for column reordering
+                }
+            )
 
         # Create DataFrame and sort by Injection_Order
         sample_info_df = pd.DataFrame(sample_info_data)
@@ -1578,7 +1623,9 @@ class DataOrganizer(BaseProcessor):
             if col not in sample_info_df.columns:
                 sample_info_df[col] = np.nan
 
-        extra_cols = [c for c in sample_info_df.columns if c not in display_cols and c != "_col_name"]
+        extra_cols = [
+            c for c in sample_info_df.columns if c not in display_cols and c != "_col_name"
+        ]
         ordered_cols = display_cols + extra_cols
         if "_col_name" in sample_info_df.columns:
             ordered_cols.append("_col_name")
@@ -1642,7 +1689,9 @@ class DataOrganizer(BaseProcessor):
 
                     # BC ID match with type
                     bc_match_col = re.search(r"(tumor|normal|benign|benignfat)?(bc\d+)", col_lower)
-                    bc_match_sample = re.search(r"(tumor|normal|benign)?\s*tissue\s*(fat\s*)?(bc\d+)", sample_lower)
+                    bc_match_sample = re.search(
+                        r"(tumor|normal|benign)?\s*tissue\s*(fat\s*)?(bc\d+)", sample_lower
+                    )
                     if bc_match_col and bc_match_sample:
                         col_type = bc_match_col.group(1) or ""
                         if "benign" in col_type:
@@ -1695,6 +1744,7 @@ class DataOrganizer(BaseProcessor):
         tables: List[List[List[str]]] = []
         try:
             from docx import Document
+
             doc = Document(file_path)
             for table in doc.tables:
                 table_rows: List[List[str]] = []
@@ -1706,7 +1756,9 @@ class DataOrganizer(BaseProcessor):
             logger.warning("python-docx not installed; using fallback DOCX parser for method file")
             tables = self._extract_docx_tables_fallback(file_path)
         except Exception as exc:
-            logger.warning("python-docx parse failed for %s (%s); using fallback parser", file_path, exc)
+            logger.warning(
+                "python-docx parse failed for %s (%s); using fallback parser", file_path, exc
+            )
             tables = self._extract_docx_tables_fallback(file_path)
 
         # Parse tables for sample information
