@@ -312,6 +312,39 @@ class DataOrganizer(BaseProcessor):
             or "pooled" in name_lower
         )
 
+    def _move_leading_metadata_to_end(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Move any leading non-mz/rt metadata columns (e.g. MZmine ID) to the end.
+
+        MZmine's default export puts the ID column first.  Relocating it lets
+        validate_input and _merge_mz_rt find m/z and RT in the expected positions
+        without requiring manual column reordering by the user.
+        """
+        if df.empty or len(df.columns) < 3:
+            return df
+
+        def _looks_like_mz_or_rt(col_lower: str) -> bool:
+            return bool(
+                "m/z" in col_lower
+                or re.search(r"\bmz\b", col_lower)
+                or re.search(r"\bmass\b", col_lower)
+                or re.search(r"\brt\b", col_lower)
+                or "retention" in col_lower
+            )
+
+        leading_meta: list = []
+        for col in df.columns:
+            col_lower = str(col).strip().lower()
+            if _looks_like_mz_or_rt(col_lower):
+                break
+            if self._is_non_sample_column(str(col)):
+                leading_meta.append(col)
+            else:
+                break
+        if not leading_meta:
+            return df
+        rest = [c for c in df.columns if c not in leading_meta]
+        return df[rest + leading_meta]
+
     def validate_input(self, df: pd.DataFrame) -> tuple:
         """
         Validate input data for organization.
@@ -394,6 +427,8 @@ class DataOrganizer(BaseProcessor):
                 rt_decimals=rt_decimals,
                 sample_type_mapping=sample_type_mapping,
             )
+
+        df = self._move_leading_metadata_to_end(df)
 
         # Validate input
         is_valid, error_msg = self.validate_input(df)
@@ -544,6 +579,8 @@ class DataOrganizer(BaseProcessor):
         - Keep separate Mz and RT output columns (no merged Mz/RT in final output)
         - Otherwise follow normalization workflow
         """
+        df = self._move_leading_metadata_to_end(df)
+
         is_valid, error_msg = self.validate_input(df)
         if not is_valid:
             return ProcessingResult(
