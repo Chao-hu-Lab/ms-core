@@ -66,7 +66,7 @@ class DataOrganizer(BaseProcessor):
         "QC": [r"qc", r"pool", r"quality"],
         "Exposure": [r"tumor", r"cancer", r"tumour"],  # Tumor -> Exposure
         "Normal": [r"normal", r"healthy"],
-        "Control": [r"benign", r"benignfat"],  # Benign -> Control
+        "Control": [r"benign", r"benignfat", r"control"],  # Benign/control -> Control
         "blank": [r"blank", r"blk"],
         "standard": [r"std", r"standard", r"sdolek"],
     }
@@ -994,6 +994,7 @@ class DataOrganizer(BaseProcessor):
         # Pattern: program2_program1_SAMPLENAME.tsv -> SAMPLENAME
         # Pattern: program2_1\\program2_program1_SAMPLENAME -> SAMPLENAME
         patterns_to_remove = [
+            r"^.+_program\d+_",  # YYYYMMDD_desc_program2_YYYYMMDD_desc_program1_SAMPLE
             r"^program\d+_(?:dna|rna)_program\d+_",  # program2_DNA_program1_
             r"^(?:dna|rna)_program\d+_",  # DNA_program1_, RNA_program1_
             r"^program\d+_program\d+_",  # program2_program1_
