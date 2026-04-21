@@ -911,14 +911,19 @@ class DataOrganizer(BaseProcessor):
         result.iloc[:, 1] = result.iloc[:, mzmine_rt_idx]
         return result.iloc[:, :mzmine_id_idx]
 
+    # MZmine exports chromatographic peak area integrated over time in minutes,
+    # while FH / XIC Extractor use seconds.  Multiply MZmine area by this factor
+    # so all downstream values share a common unit (counts · s).
+    MZMINE_AREA_UNIT_FACTOR: float = 60.0
+
     def false_positive_fix(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply MZmine false-positive filtering to a beforeVBA format DataFrame.
 
         Replicates the logic of false_positive_fix_v2.bas without requiring Excel:
         1. Remove features (rows) where MZmine ID, m/z, or RT is absent/NA.
         2. For each FH sample column: where the FH value is present, replace it
-           with the corresponding MZmine area value; where FH is absent (NA),
-           leave the cell as NaN.
+           with the corresponding MZmine area value (scaled min→s); where FH is
+           absent (NA), leave the cell as NaN.
         3. Replace the FH Mz (col 0) and FH RT (col 1) with MZmine m/z / RT.
         4. Drop the MZmine side entirely (MZmine ID, m/z, RT, area columns).
 
@@ -975,7 +980,7 @@ class DataOrganizer(BaseProcessor):
             area_vals = result.iloc[:, area_pos]
             fh_present = ~fh_vals.map(_is_missing)
             merged = fh_vals.copy()
-            merged.loc[fh_present] = area_vals.loc[fh_present]
+            merged.loc[fh_present] = area_vals.loc[fh_present] * self.MZMINE_AREA_UNIT_FACTOR
             result.iloc[:, fh_pos] = merged
 
         # STEP 3: replace FH Mz/RT with MZmine m/z/RT
