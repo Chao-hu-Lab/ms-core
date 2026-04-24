@@ -59,6 +59,7 @@ class PipelineConfig:
     # Step 2: Duplicate removal
     mz_tolerance_ppm: float = 20.0
     rt_tolerance: float = 1.0
+    duplicate_merge_mode: str = "per_sample_max"
 
     # Step 3: MS quality filter (ratio-based)
     quality_bg_threshold: float = 0.33
@@ -151,6 +152,8 @@ def _step_duplicate_remove(ds: MSDataset, **params: Any) -> MSDataset:
         kw["mz_tolerance_ppm"] = params["mz_tolerance_ppm"]
     if "rt_tolerance" in params:
         kw["rt_tolerance"] = params["rt_tolerance"]
+    if "merge_mode" in params:
+        kw["merge_mode"] = params["merge_mode"]
     result = processor.process(ds.matrix, **kw)
     if not result.success:
         raise RuntimeError(f"Step 2 failed: {result.message}")
@@ -542,6 +545,7 @@ class MSPipeline:
             2: {
                 "mz_tolerance_ppm": cfg.mz_tolerance_ppm,
                 "rt_tolerance": cfg.rt_tolerance,
+                "merge_mode": cfg.duplicate_merge_mode,
             },
             3: {
                 "background_threshold": cfg.quality_bg_threshold,

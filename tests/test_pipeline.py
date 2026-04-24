@@ -8,6 +8,7 @@ in-memory calibration path added to eliminate temp-file round-trips.
 import numpy as np
 import pandas as pd
 import pytest
+from types import SimpleNamespace
 
 from ms_core.dataset import MSDataset
 from ms_core.pipeline import (
@@ -170,6 +171,31 @@ class TestRunAll:
         pipeline = MSPipeline()
         with pytest.raises(ValueError, match="Invalid step"):
             pipeline.run_step(99, sample_dataset)
+
+    def test_run_all_forwards_duplicate_merge_mode_to_step2(self, sample_dataset, monkeypatch):
+        captured: dict[str, object] = {}
+
+        from ms_core.preprocessing import duplicate_remover as duplicate_module
+
+        class FakeDuplicateRemover:
+            def process(self, matrix, **kwargs):
+                captured["kwargs"] = kwargs
+                return SimpleNamespace(success=True, data=matrix.copy(), message="ok")
+
+        monkeypatch.setattr(duplicate_module, "DuplicateRemover", FakeDuplicateRemover)
+
+        config = PipelineConfig(
+            duplicate_merge_mode="fill_gaps",
+            skip_steps={1, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+        )
+        pipeline = MSPipeline()
+        pipeline.run_all(sample_dataset, config)
+
+        assert captured["kwargs"] == {
+            "mz_tolerance_ppm": 20.0,
+            "rt_tolerance": 1.0,
+            "merge_mode": "fill_gaps",
+        }
 
 
 # ======================================================================

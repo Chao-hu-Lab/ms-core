@@ -11,7 +11,7 @@ Based on: ms-data-processor (https://github.com/bosschen0429/ms-data-processor)
 """
 
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Set, Tuple
+from typing import Optional, Dict, Any, List, Set, Tuple, Literal, cast
 import pandas as pd
 import numpy as np
 
@@ -19,6 +19,8 @@ from ms_core.preprocessing.base import BaseProcessor, ProcessingResult
 from ms_core.preprocessing.settings import DuplicateRemovalConfig
 from ms_core.utils.file_handler import parse_mz_rt_string
 from ms_core.utils.validators import detect_fixed_columns
+
+MergeMode = Literal["fill_gaps", "per_sample_max"]
 
 
 class DuplicateRemover(BaseProcessor):
@@ -66,6 +68,7 @@ class DuplicateRemover(BaseProcessor):
         df: pd.DataFrame,
         mz_tolerance_ppm: Optional[float] = None,
         rt_tolerance: Optional[float] = None,
+        merge_mode: Optional[str] = None,
         top_n: Optional[int] = None,
         protected_rows: Optional[Set[int]] = None,
         enable_degeneracy_annotation: Optional[bool] = None,
@@ -83,6 +86,7 @@ class DuplicateRemover(BaseProcessor):
             df: Input DataFrame
             mz_tolerance_ppm: m/z tolerance in ppm (default from config)
             rt_tolerance: RT tolerance in minutes (default from config)
+            merge_mode: Duplicate-row merge policy (`per_sample_max` or `fill_gaps`)
             top_n: Limit output to top N signals by intensity
             protected_rows: Set of row indices to protect from removal
             **kwargs: Additional parameters
@@ -95,6 +99,9 @@ class DuplicateRemover(BaseProcessor):
         # Use config defaults if not specified
         mz_tol = mz_tolerance_ppm if mz_tolerance_ppm is not None else self.config.mz_tolerance_ppm
         rt_tol = rt_tolerance if rt_tolerance is not None else self.config.rt_tolerance
+        normalized_merge_mode = self._normalize_merge_mode(
+            merge_mode if merge_mode is not None else self.config.merge_mode
+        )
 
         degeneracy_enabled = (
             enable_degeneracy_annotation
@@ -182,6 +189,7 @@ class DuplicateRemover(BaseProcessor):
                 result_df,
                 merge_groups,
                 col_info["intensity_cols"],
+                normalized_merge_mode,
             )
             dup_stats.update(merge_stats)
 
@@ -269,8 +277,13 @@ class DuplicateRemover(BaseProcessor):
 
             message = f"Duplicate removal completed. Removed {dup_stats.get('duplicates_removed', 0)} duplicates."
             recovered = dup_stats.get("data_points_recovered", 0)
+            upgraded = dup_stats.get("data_points_upgraded", 0)
             if recovered > 0:
                 message += f" Merged {dup_stats.get('groups_merged', 0)} groups, recovered {recovered} data points."
+            elif dup_stats.get("groups_merged", 0) > 0:
+                message += f" Merged {dup_stats.get('groups_merged', 0)} groups."
+            if upgraded > 0:
+                message += f" Upgraded {upgraded} overlapping data points via {normalized_merge_mode}."
             if degeneracy_enabled:
                 message += f" Annotated {degeneracy_stats.get('degeneracy_adduct_count', 0)} degeneracy features."
 
@@ -282,6 +295,7 @@ class DuplicateRemover(BaseProcessor):
                 metadata={
                     "mz_tolerance_ppm": mz_tol,
                     "rt_tolerance": rt_tol,
+                    "merge_mode": normalized_merge_mode,
                     "column_info": col_info,
                     "red_font_rows": sorted(new_protected_rows),
                     "protected_rows": sorted(new_protected_rows),
@@ -359,6 +373,28 @@ class DuplicateRemover(BaseProcessor):
                 col_info["intensity_cols"].append(col)
 
         return col_info
+
+    @staticmethod
+    def _normalize_merge_mode(merge_mode: str) -> MergeMode:
+        """Validate and normalize duplicate-row merge policy."""
+        normalized = str(merge_mode).strip().lower()
+        valid_modes: Set[str] = {"fill_gaps", "per_sample_max"}
+        if normalized not in valid_modes:
+            valid_list = ", ".join(sorted(valid_modes))
+            raise ValueError(f"Unsupported merge_mode '{merge_mode}'. Expected one of: {valid_list}")
+        return cast(MergeMode, normalized)
+
+    @staticmethod
+    def _coerce_positive_number(value: Any) -> float | None:
+        """Return a positive numeric value, or None for zero/NaN/non-numeric cells."""
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        if pd.isna(numeric_value) or numeric_value <= 0:
+            return None
+        return numeric_value
 
     def _is_numeric_column(self, series: pd.Series) -> bool:
         """Check if a series contains numeric values.
@@ -456,6 +492,10 @@ class DuplicateRemover(BaseProcessor):
         """
         Find unique signals using RT-window grouping and m/z tolerance.
 
+        Protected rows only influence representative selection. Once a
+        representative is chosen, downstream merge behavior is still governed
+        by ``merge_mode``.
+
         Returns:
             keep_indices: set of row indices to keep (representative per group)
             stats: deduplication statistics
@@ -541,13 +581,21 @@ class DuplicateRemover(BaseProcessor):
         df: pd.DataFrame,
         merge_groups: List[List[int]],
         intensity_cols: List[str],
+        merge_mode: MergeMode,
     ) -> Tuple[pd.DataFrame, Dict[str, int]]:
         """
         Merge intensity data from donor rows into the representative row.
 
-        For each duplicate group, fills NaN values in the best row with
-        non-NaN values from donor rows. This recovers sample-feature data
-        points that would otherwise be lost by pick-best-only deduplication.
+        ``fill_gaps`` keeps legacy behavior: only fill zero/NaN cells on the
+        representative row.
+
+        ``per_sample_max`` collapses each duplicate group by taking the
+        highest positive sample value across the representative and donor rows.
+        This avoids losing signal when the same feature was split into multiple
+        rows but should still remain a single row downstream.
+
+        Protected rows affect which row survives as the representative, but
+        they do not freeze the representative's per-sample intensities.
 
         Args:
             df: DataFrame with all rows still present
@@ -560,6 +608,7 @@ class DuplicateRemover(BaseProcessor):
         merge_stats = {
             "groups_merged": 0,
             "data_points_recovered": 0,
+            "data_points_upgraded": 0,
         }
 
         if not merge_groups or not intensity_cols:
@@ -569,22 +618,51 @@ class DuplicateRemover(BaseProcessor):
             best_idx = group[0]
             donor_indices = group[1:]
             recovered_in_group = 0
+            upgraded_in_group = 0
 
             for col in intensity_cols:
-                best_val = df.at[best_idx, col]
-                if pd.notna(best_val) and best_val != 0:
-                    continue
-                # Try each donor for this column
-                for donor_idx in donor_indices:
-                    donor_val = df.at[donor_idx, col]
-                    if pd.notna(donor_val) and donor_val != 0:
-                        df.at[best_idx, col] = donor_val
+                best_raw = df.at[best_idx, col]
+                best_numeric = self._coerce_positive_number(best_raw)
+
+                if merge_mode == "fill_gaps":
+                    if best_numeric is not None:
+                        continue
+                    for donor_idx in donor_indices:
+                        donor_raw = df.at[donor_idx, col]
+                        donor_numeric = self._coerce_positive_number(donor_raw)
+                        if donor_numeric is None:
+                            continue
+                        df.at[best_idx, col] = donor_raw
                         recovered_in_group += 1
                         break
+                    continue
 
-            if recovered_in_group > 0:
+                selected_raw = best_raw
+                selected_numeric = best_numeric
+                selected_from_donor = False
+                for donor_idx in donor_indices:
+                    donor_raw = df.at[donor_idx, col]
+                    donor_numeric = self._coerce_positive_number(donor_raw)
+                    if donor_numeric is None:
+                        continue
+                    if selected_numeric is None or donor_numeric > selected_numeric:
+                        selected_raw = donor_raw
+                        selected_numeric = donor_numeric
+                        selected_from_donor = True
+
+                if not selected_from_donor:
+                    continue
+
+                df.at[best_idx, col] = selected_raw
+                if best_numeric is None:
+                    recovered_in_group += 1
+                else:
+                    upgraded_in_group += 1
+
+            if recovered_in_group > 0 or upgraded_in_group > 0:
                 merge_stats["groups_merged"] += 1
                 merge_stats["data_points_recovered"] += recovered_in_group
+                merge_stats["data_points_upgraded"] += upgraded_in_group
 
         return df, merge_stats
 

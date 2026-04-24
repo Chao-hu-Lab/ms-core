@@ -921,9 +921,9 @@ class DataOrganizer(BaseProcessor):
 
         Replicates the logic of false_positive_fix_v2.bas without requiring Excel:
         1. Remove features (rows) where MZmine ID, m/z, or RT is absent/NA.
-        2. For each FH sample column: where the FH value is present, replace it
+        2. For each FH sample column: where the FH value is present and non-zero, replace it
            with the corresponding MZmine area value (scaled min→s); where FH is
-           absent (NA), leave the cell as NaN.
+           absent (NA/blank/zero), leave the cell as NaN.
         3. Replace the FH Mz (col 0) and FH RT (col 1) with MZmine m/z / RT.
         4. Drop the MZmine side entirely (MZmine ID, m/z, RT, area columns).
 
@@ -944,18 +944,26 @@ class DataOrganizer(BaseProcessor):
         mzmine_area_start = mzmine_id_idx + 3
         n_fh = mzmine_id_idx - 2  # number of FH sample columns
 
-        def _is_missing(v: Any) -> bool:
+        def _is_blank_missing(v: Any) -> bool:
             if pd.isna(v):
                 return True
             return str(v).strip().upper() in ("", "NA", "NAN")
+
+        def _is_measurement_missing(v: Any) -> bool:
+            if _is_blank_missing(v):
+                return True
+            try:
+                return float(str(v).strip()) == 0.0
+            except ValueError:
+                return False
 
         result = df.copy()
 
         # STEP 1: drop rows where MZmine identity is absent (includes Sample_Type row)
         keep = ~(
-            result.iloc[:, mzmine_id_idx].map(_is_missing)
-            | result.iloc[:, mzmine_mz_idx].map(_is_missing)
-            | result.iloc[:, mzmine_rt_idx].map(_is_missing)
+            result.iloc[:, mzmine_id_idx].map(_is_blank_missing)
+            | result.iloc[:, mzmine_mz_idx].map(_is_blank_missing)
+            | result.iloc[:, mzmine_rt_idx].map(_is_blank_missing)
         )
         result = result.loc[keep].reset_index(drop=True)
 
@@ -977,18 +985,28 @@ class DataOrganizer(BaseProcessor):
             if area_pos is None:
                 continue
             fh_vals = result.iloc[:, fh_pos]
-            area_vals = result.iloc[:, area_pos]
-            fh_present = ~fh_vals.map(_is_missing)
-            merged = fh_vals.copy()
-            merged.loc[fh_present] = area_vals.loc[fh_present] * self.MZMINE_AREA_UNIT_FACTOR
-            result.iloc[:, fh_pos] = merged
+            area_vals = pd.to_numeric(result.iloc[:, area_pos], errors="coerce")
+            fh_present = ~fh_vals.map(_is_measurement_missing)
+            area_present = ~(area_vals.isna() | area_vals.eq(0))
+            merged = pd.to_numeric(fh_vals, errors="coerce")
+            merged = merged.mask(merged.eq(0))
+            replace_mask = fh_present & area_present
+            merged.loc[replace_mask] = (
+                area_vals.loc[replace_mask] * self.MZMINE_AREA_UNIT_FACTOR
+            )
+            merged = merged.mask(merged.eq(0))
+            result.isetitem(fh_pos, merged.astype("float64"))
 
         # STEP 3: replace FH Mz/RT with MZmine m/z/RT
         result.iloc[:, 0] = result.iloc[:, mzmine_mz_idx].to_numpy()
         result.iloc[:, 1] = result.iloc[:, mzmine_rt_idx].to_numpy()
 
         # STEP 4: drop MZmine side
-        return result.iloc[:, :mzmine_id_idx].copy()
+        final = result.iloc[:, :mzmine_id_idx].copy()
+        for fh_pos in range(2, len(final.columns)):
+            sample_vals = pd.to_numeric(final.iloc[:, fh_pos], errors="coerce")
+            final.isetitem(fh_pos, sample_vals.mask(sample_vals.eq(0)).astype("float64"))
+        return final
 
     def process_combined_and_fix(
         self,
