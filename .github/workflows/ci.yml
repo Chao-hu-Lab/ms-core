@@ -1,0 +1,14 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main", "feature/*", "fix/*", "chore/*"]
+  pull_request:
+    branches: ["master", "main"]
+
+jobs:
+  test:
+    uses: Chao-hu-Lab/shared-workflows/.github/workflows/python-ci.yml@main
+    with:
+      python-versions: '["3.11", "3.12"]'
+      pythonpath: "src"

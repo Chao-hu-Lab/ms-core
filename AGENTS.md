@@ -61,6 +61,9 @@ git worktree add ../<repo>.worktrees/<branch-name> -b <type>/<branch-name>
 
 Do not claim completion without fresh evidence.
 
+Durable testing policy lives in `docs/TESTING.md`. Use that file to select the
+narrowest sufficient verification command.
+
 Default verification command:
 
 ```bash
@@ -68,6 +71,13 @@ pytest tests/ -v --tb=short -x
 ```
 
 For smaller tasks, run the narrowest sufficient check first, then expand if risk justifies it.
+
+If marker classification or pytest config changes, run:
+
+```bash
+pytest tests/test_testing_markers.py -v --tb=short
+pytest --collect-only tests -q
+```
 
 ## Root Hygiene Rules
 
@@ -83,6 +93,8 @@ For smaller tasks, run the narrowest sufficient check first, then expand if risk
 - If `ms-core` is being changed from a parent repository that tracks it as a submodule, commit in `ms-core` first
 - Push the `ms-core` commit before updating the parent repository's submodule pointer
 - Do not leave a parent repository pointing at an unpushed `ms-core` commit
+- Public contract changes should be verified in `ms-core` first, then in each consumer repository that bumps the pin
+- `ms-core` must not import toolkit, DNP, or project-specific GUI code
 
 ## Prohibited Actions
 
