@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Shared core library for mass spectrometry data processing, calibration, and statistical analysis."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "MS Toolbox Team" }]
 
 dependencies = [
@@ -16,10 +16,12 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.10",
     "scikit-learn>=1.2",
+    "pycombat>=0.3",
     "statsmodels>=0.14",
     "matplotlib>=3.7",
     "seaborn>=0.12",
     "openpyxl>=3.1",
+    "pyarrow>=14.0.0",
     "qnorm>=0.8",
 ]
 
@@ -30,7 +32,6 @@ full = [
     "fancyimpute>=0.7",
     "pyppca>=0.0.4",
     "pyopls>=0.4",
-    "pycombat>=0.3",
     "scikit-bio>=0.5",
     "python-docx>=0.8",
 ]
@@ -53,6 +54,14 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-p no:cacheprovider"
+addopts = "-p no:cacheprovider --strict-markers"
 pythonpath = ["src"]
 norecursedirs = [".tmp", ".pytest_cache", "__pycache__"]
+markers = [
+    "algorithm: core preprocessing, calibration, statistics, or feature filtering behavior",
+    "contract: public ms-core data model, pipeline, or storage contract consumed by downstream projects",
+    "hygiene: repository temp/cache/root hygiene checks",
+    "io: file, cache, parquet, Excel, or intermediate storage behavior",
+    "pipeline: pipeline orchestration and step dispatch behavior",
+    "serial: tests that touch shared repo state or should not run concurrently",
+]

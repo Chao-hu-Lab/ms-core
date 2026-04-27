@@ -138,7 +138,7 @@ class TestUndo:
     def test_undo_restores_snapshot(self, sample_dataset):
         pipeline = MSPipeline()
         ds1 = pipeline.run_step(4, sample_dataset)
-        ds2 = pipeline.run_step(10, ds1)
+        pipeline.run_step(10, ds1)
 
         # Undo step 10 → back to post-step-4 state
         restored = pipeline.undo(10)
