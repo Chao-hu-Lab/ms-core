@@ -31,6 +31,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from ms_core.preprocessing.base import BaseProcessor, ProcessingResult
+from ms_core.preprocessing.combined_tsv import CombinedTsvPreprocessor
 from ms_core.preprocessing.method_sequence import (
     InjectionInfo,
     extract_docx_tables_fallback,
@@ -81,6 +82,7 @@ class DataOrganizer(BaseProcessor):
         super().__init__("Data Organizer")
         self.config = config or DataOrganizerConfig()
         self._sample_info_builder = SampleInfoBuilder()
+        self._combined_tsv_preprocessor = CombinedTsvPreprocessor(self._process_statistics_mode)
 
     @staticmethod
     def _is_pre_merged_mz_rt_header(col_name: str) -> bool:
@@ -669,15 +671,8 @@ class DataOrganizer(BaseProcessor):
             )
 
     def _detect_combined_split(self, df: pd.DataFrame) -> Optional[int]:
-        """Return the column index of the MZmine ID column that marks the FH/MZmine split.
-
-        Returns None when no such column is found (input is not a combined TSV).
-        """
-        for idx, col in enumerate(df.columns):
-            compact = re.sub(r"[^a-z0-9]+", "", str(col).strip().lower())
-            if compact == "mzmineid":
-                return idx
-        return None
+        """Return the column index of the MZmine ID column that marks the FH/MZmine split."""
+        return CombinedTsvPreprocessor.detect_split(df)
 
     def process_combined(
         self,
@@ -687,233 +682,25 @@ class DataOrganizer(BaseProcessor):
         rt_decimals: int = 2,
         sample_type_mapping: Optional[Dict[str, str]] = None,
     ) -> ProcessingResult:
-        """Process a combined FH+MZmine TSV directly into beforeVBA format.
-
-        Splits the DataFrame at the MZmine ID column, processes each half
-        independently in statistics mode (preserving separate Mz/RT columns,
-        applying injection-order reordering via the method file), then
-        concatenates the two processed halves horizontally.
-
-        The result replicates the manual workflow: run Step-1 statistics mode
-        on each side separately, then paste them side-by-side.
-        """
-        split_idx = self._detect_combined_split(df)
-        if split_idx is None:
-            return ProcessingResult(
-                success=False,
-                errors=["No 'MZmine ID' column found — cannot identify FH/MZmine boundary"],
-                message="Combined mode requires a 'MZmine ID' split column in the input",
-            )
-
-        fh_df = df.iloc[:, :split_idx].copy().reset_index(drop=True)
-        mz_df = df.iloc[:, split_idx:].copy().reset_index(drop=True)
-
-        # Drop trailing all-NaN unnamed columns exported by MZmine
-        valid_mz_cols = [
-            c
-            for c in mz_df.columns
-            if not (str(c).startswith("Unnamed:") and mz_df[c].isna().all())
-        ]
-        mz_df = mz_df[valid_mz_cols]
-
-        fh_result = self._process_statistics_mode(
-            df=fh_df,
+        """Process a combined FH+MZmine TSV directly into beforeVBA format."""
+        return self._combined_tsv_preprocessor.process_combined(
+            df=df,
             method_file=method_file,
             mz_decimals=mz_decimals,
             rt_decimals=rt_decimals,
             sample_type_mapping=sample_type_mapping,
-        )
-        if not fh_result.success:
-            return ProcessingResult(
-                success=False,
-                errors=fh_result.errors,
-                message=f"FH side processing failed: {fh_result.message}",
-            )
-
-        mz_result = self._process_statistics_mode(
-            df=mz_df,
-            method_file=method_file,
-            mz_decimals=mz_decimals,
-            rt_decimals=rt_decimals,
-            sample_type_mapping=sample_type_mapping,
-        )
-        if not mz_result.success:
-            return ProcessingResult(
-                success=False,
-                errors=mz_result.errors,
-                message=f"MZmine side processing failed: {mz_result.message}",
-            )
-
-        fh_data = fh_result.data.reset_index(drop=True)
-        mz_data = mz_result.data.reset_index(drop=True)
-
-        # _move_leading_metadata_to_end relocated MZmine ID to the tail of mz_data.
-        # The VBA expects layout: FH_Mz|FH_RT|FH_samples|MZmine_ID|MZmine_mz|MZmine_RT|MZmine_area
-        # Restore that order by moving MZmine ID back to the front of the MZmine side.
-        is_mzmine_id = [
-            re.sub(r"[^a-z0-9]+", "", str(c).strip().lower()) == "mzmineid" for c in mz_data.columns
-        ]
-        id_cols = [c for c, flag in zip(mz_data.columns, is_mzmine_id) if flag]
-        other_cols = [c for c, flag in zip(mz_data.columns, is_mzmine_id) if not flag]
-        mz_data = mz_data[id_cols + other_cols]
-
-        combined = pd.concat([fh_data, mz_data], axis=1)
-
-        return ProcessingResult(
-            success=True,
-            data=combined,
-            message="Combined mode completed.",
-            statistics={
-                "mode": "combined",
-                "fh_cols": len(fh_data.columns),
-                "mz_cols": len(mz_data.columns),
-                "total_cols": len(combined.columns),
-                "total_rows": len(combined),
-            },
-            metadata={
-                "mode": "combined",
-                "fh_metadata": fh_result.metadata,
-                "mz_metadata": mz_result.metadata,
-                "sample_info": fh_result.metadata.get("sample_info")
-                if fh_result.metadata
-                else None,
-            },
         )
 
     @staticmethod
     def post_vba_cleanup(df: pd.DataFrame) -> pd.DataFrame:
-        """Replace FH Mz/RT with MZmine values and drop the MZmine side.
+        """Replace FH Mz/RT with MZmine values and drop the MZmine side."""
+        return CombinedTsvPreprocessor.post_vba_cleanup(df)
 
-        Call this after running the VBA macro (false_positive_fix_v2.bas) and
-        saving the result back to a file readable by pandas.  Automates the two
-        remaining manual steps:
-          1. Replace column 0 (FH Mz) with the MZmine m/z values.
-          2. Replace column 1 (FH RT) with the MZmine RT values.
-          3. Drop the MZmine ID, m/z, RT, and area columns.
-
-        The MZmine ID column position is auto-detected, so n (sample count) does
-        not need to be supplied manually.
-        """
-        mzmine_id_idx: Optional[int] = None
-        for idx, col in enumerate(df.columns):
-            if re.sub(r"[^a-z0-9]+", "", str(col).strip().lower()) == "mzmineid":
-                mzmine_id_idx = idx
-                break
-
-        if mzmine_id_idx is None:
-            raise ValueError(
-                "MZmine ID column not found — is this a beforeVBA/afterVBA format file?"
-            )
-
-        mzmine_mz_idx = mzmine_id_idx + 1
-        mzmine_rt_idx = mzmine_id_idx + 2
-
-        if mzmine_rt_idx >= len(df.columns):
-            raise ValueError(
-                "Expected MZmine m/z and RT columns immediately after MZmine ID column"
-            )
-
-        result = df.copy()
-        result.iloc[:, 0] = result.iloc[:, mzmine_mz_idx]
-        result.iloc[:, 1] = result.iloc[:, mzmine_rt_idx]
-        return result.iloc[:, :mzmine_id_idx]
-
-    # MZmine exports chromatographic peak area integrated over time in minutes,
-    # while FH / XIC Extractor use seconds.  Multiply MZmine area by this factor
-    # so all downstream values share a common unit (counts · s).
-    MZMINE_AREA_UNIT_FACTOR: float = 60.0
+    MZMINE_AREA_UNIT_FACTOR: float = CombinedTsvPreprocessor.MZMINE_AREA_UNIT_FACTOR
 
     def false_positive_fix(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply MZmine false-positive filtering to a beforeVBA format DataFrame.
-
-        Replicates the logic of false_positive_fix_v2.bas without requiring Excel:
-        1. Remove features (rows) where MZmine ID, m/z, or RT is absent/NA.
-        2. For each FH sample column: where the FH value is present and non-zero, replace it
-           with the corresponding MZmine area value (scaled min→s); where FH is
-           absent (NA/blank/zero), leave the cell as NaN.
-        3. Replace the FH Mz (col 0) and FH RT (col 1) with MZmine m/z / RT.
-        4. Drop the MZmine side entirely (MZmine ID, m/z, RT, area columns).
-
-        The Sample_Type row (if present as row 0) is removed as part of step 1
-        because its MZmine ID value is "na", which satisfies the missing-value check.
-        """
-        mzmine_id_idx: Optional[int] = None
-        for idx, col in enumerate(df.columns):
-            if re.sub(r"[^a-z0-9]+", "", str(col).strip().lower()) == "mzmineid":
-                mzmine_id_idx = idx
-                break
-
-        if mzmine_id_idx is None:
-            raise ValueError("MZmine ID column not found — expected beforeVBA format input")
-
-        mzmine_mz_idx = mzmine_id_idx + 1
-        mzmine_rt_idx = mzmine_id_idx + 2
-        mzmine_area_start = mzmine_id_idx + 3
-        n_fh = mzmine_id_idx - 2  # number of FH sample columns
-
-        def _is_blank_missing(v: Any) -> bool:
-            if pd.isna(v):
-                return True
-            return str(v).strip().upper() in ("", "NA", "NAN")
-
-        def _is_measurement_missing(v: Any) -> bool:
-            if _is_blank_missing(v):
-                return True
-            try:
-                return float(str(v).strip()) == 0.0
-            except ValueError:
-                return False
-
-        result = df.copy()
-
-        # STEP 1: drop rows where MZmine identity is absent (includes Sample_Type row)
-        keep = ~(
-            result.iloc[:, mzmine_id_idx].map(_is_blank_missing)
-            | result.iloc[:, mzmine_mz_idx].map(_is_blank_missing)
-            | result.iloc[:, mzmine_rt_idx].map(_is_blank_missing)
-        )
-        result = result.loc[keep].reset_index(drop=True)
-
-        # STEP 2: replace FH area with MZmine area where FH is non-NA.
-        # Build name→position map for MZmine area columns using the ORIGINAL df indices
-        # (positions stay valid after row-filtering because only rows, not columns, are dropped).
-        # Must use .iloc[:, pos] rather than df[name] because FH and MZmine columns share
-        # the same simplified names after header processing, causing duplicates that make
-        # df[name] return a DataFrame instead of a Series.
-        mzmine_area_name_to_pos: Dict[str, int] = {}
-        for i in range(mzmine_area_start, len(df.columns)):
-            name = str(df.columns[i])
-            if name not in mzmine_area_name_to_pos:
-                mzmine_area_name_to_pos[name] = i
-
-        for fh_pos in range(2, mzmine_id_idx):
-            fh_col_name = str(result.columns[fh_pos])
-            area_pos = mzmine_area_name_to_pos.get(fh_col_name)
-            if area_pos is None:
-                continue
-            fh_vals = result.iloc[:, fh_pos]
-            area_vals = pd.to_numeric(result.iloc[:, area_pos], errors="coerce")
-            fh_present = ~fh_vals.map(_is_measurement_missing)
-            area_present = ~(area_vals.isna() | area_vals.eq(0))
-            merged = pd.to_numeric(fh_vals, errors="coerce")
-            merged = merged.mask(merged.eq(0))
-            replace_mask = fh_present & area_present
-            merged.loc[replace_mask] = (
-                area_vals.loc[replace_mask] * self.MZMINE_AREA_UNIT_FACTOR
-            )
-            merged = merged.mask(merged.eq(0))
-            result.isetitem(fh_pos, merged.astype("float64"))
-
-        # STEP 3: replace FH Mz/RT with MZmine m/z/RT
-        result.iloc[:, 0] = result.iloc[:, mzmine_mz_idx].to_numpy()
-        result.iloc[:, 1] = result.iloc[:, mzmine_rt_idx].to_numpy()
-
-        # STEP 4: drop MZmine side
-        final = result.iloc[:, :mzmine_id_idx].copy()
-        for fh_pos in range(2, len(final.columns)):
-            sample_vals = pd.to_numeric(final.iloc[:, fh_pos], errors="coerce")
-            final.isetitem(fh_pos, sample_vals.mask(sample_vals.eq(0)).astype("float64"))
-        return final
+        """Apply MZmine false-positive filtering to a beforeVBA format DataFrame."""
+        return self._combined_tsv_preprocessor.false_positive_fix(df)
 
     def process_combined_and_fix(
         self,
@@ -923,51 +710,13 @@ class DataOrganizer(BaseProcessor):
         rt_decimals: int = 2,
         sample_type_mapping: Optional[Dict[str, str]] = None,
     ) -> ProcessingResult:
-        """Full end-to-end MZmine pipeline: combined TSV → final output.
-
-        Equivalent to the entire manual workflow:
-        combined TSV → beforeVBA (process_combined) → false_positive_fix (VBA replacement)
-
-        Output has:
-        - MZmine m/z and RT as Mz/RT columns
-        - FH areas replaced by MZmine peak areas where FH detected the feature
-        - Only features found by both FH and MZmine
-        """
-        combined_result = self.process_combined(
+        """Full end-to-end MZmine pipeline: combined TSV to final output."""
+        return self._combined_tsv_preprocessor.process_combined_and_fix(
             df=df,
             method_file=method_file,
             mz_decimals=mz_decimals,
             rt_decimals=rt_decimals,
             sample_type_mapping=sample_type_mapping,
-        )
-        if not combined_result.success:
-            return combined_result
-
-        try:
-            final_df = self.false_positive_fix(combined_result.data)
-        except Exception as exc:
-            return ProcessingResult(
-                success=False,
-                errors=[str(exc)],
-                message=f"False-positive fix failed: {exc}",
-            )
-
-        input_rows = len(combined_result.data) - 1  # minus Sample_Type row
-        return ProcessingResult(
-            success=True,
-            data=final_df,
-            message=f"Combined pipeline completed. {input_rows - len(final_df)} features removed.",
-            statistics={
-                "mode": "combined_fix",
-                "input_features": input_rows,
-                "output_features": len(final_df),
-                "removed_features": input_rows - len(final_df),
-                "output_cols": len(final_df.columns),
-            },
-            metadata={
-                **(combined_result.metadata or {}),
-                "mode": "combined_fix",
-            },
         )
 
     def _validate_statistics_input(self, df: pd.DataFrame) -> Tuple[bool, str]:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 ALGORITHM_TEST_FILES = frozenset(
     {
+        "test_combined_tsv_preprocessor.py",
         "test_data_organizer_false_positive_fix.py",
         "test_feature_filter_small_n.py",
     }
