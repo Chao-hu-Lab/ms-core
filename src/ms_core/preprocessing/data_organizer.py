@@ -39,13 +39,13 @@ from ms_core.preprocessing.method_sequence import (
     parse_injection_volume_from_cells,
 )
 from ms_core.preprocessing.sample_identity import (
-    build_sample_info_identity,
     extract_primary_sample_token,
     extract_raw_sample_name,
     is_likely_sample_name,
     normalize_sample_key,
     simplify_method_sample_name,
 )
+from ms_core.preprocessing.sample_info_builder import SampleInfoBuilder, is_non_sample_column
 from ms_core.preprocessing.settings import DataOrganizerConfig
 from ms_core.utils.validators import detect_fixed_columns
 
@@ -80,6 +80,7 @@ class DataOrganizer(BaseProcessor):
         """
         super().__init__("Data Organizer")
         self.config = config or DataOrganizerConfig()
+        self._sample_info_builder = SampleInfoBuilder()
 
     @staticmethod
     def _is_pre_merged_mz_rt_header(col_name: str) -> bool:
@@ -137,15 +138,7 @@ class DataOrganizer(BaseProcessor):
 
     def _is_non_sample_column(self, column_name: str) -> bool:
         """Return True when a column is metadata and should not be treated as a sample."""
-        name = str(column_name).strip().lower()
-        compact = re.sub(r"[^a-z0-9]+", "", name)
-        if compact in {"rowid", "featureid", "feature", "id", "mzmineid", "mzminertmin", "z"}:
-            return True
-        if name.startswith("unnamed:"):
-            return True
-        if "mzmine rt" in name:
-            return True
-        return False
+        return is_non_sample_column(column_name)
 
     def _normalize_sample_type_value(self, value: Any) -> Optional[str]:
         """Normalize sample type labels to toolkit's canonical values."""
@@ -1434,177 +1427,8 @@ class DataOrganizer(BaseProcessor):
         df: pd.DataFrame,
         injection_info_list: List[InjectionInfo],
     ) -> pd.DataFrame:
-        """
-        Build SampleInfo DataFrame from column names and injection info.
-
-        Creates a mapping between column names and injection order.
-        Re-numbers Injection_Order starting from 1, excluding blanks and standards.
-
-        Args:
-            df: DataFrame with simplified column headers
-            injection_info_list: List of InjectionInfo from method file
-
-        Returns:
-            SampleInfo DataFrame with columns:
-            - Sample_Name: RawIntensity column name used as downstream join key
-            - Sample_Type: Detected sample type
-            - Injection_Order: Re-numbered order (starting from 1)
-            - Injection_Volume: Volume from method file
-            - Method_Sample_Name: Matched sample name from Word document
-        """
-        # Determine number of fixed columns
-        fixed_cols, num_fixed = detect_fixed_columns(df)
-
-        # Get sample columns (skip fixed columns and metadata-only columns)
-        all_trailing_cols = list(df.columns[num_fixed:])
-        sample_cols = [col for col in all_trailing_cols if not self._is_non_sample_column(str(col))]
-
-        # Get Sample_Type row (first data row)
-        sample_type_row = df.iloc[0]
-
-        # Build mapping from injection info with better matching
-        # Filter out blanks, standards, and non-sample entries
-        filtered_injection_list = []
-        for info in injection_info_list:
-            if self._is_likely_sample_name(info.file_name):
-                filtered_injection_list.append(info)
-
-        # Sort by original injection order and re-number starting from 1
-        filtered_injection_list.sort(key=lambda x: x.injection_order)
-        for new_order, info in enumerate(filtered_injection_list, start=1):
-            info.injection_order = new_order
-
-        # Build fast lookup map from normalized keys to injection info
-        info_by_key: Dict[str, InjectionInfo] = {}
-        for info in filtered_injection_list:
-            keys = {
-                self._normalize_sample_key(info.file_name),
-                self._normalize_sample_key(info.sample_name),
-                self._normalize_sample_key(self._simplify_word_sample_name(info.file_name)),
-                self._normalize_sample_key(
-                    self._extract_primary_sample_token(info.file_name) or ""
-                ),
-            }
-            for key in keys:
-                if key and key not in info_by_key:
-                    info_by_key[key] = info
-
-        # Build matching data
-        sample_info_data = []
-        col_to_info_map = {}  # Map column name to matched injection info
-
-        def detect_variant(text: str) -> str:
-            """Detect DNA/RNA/DNA+RNA variant from text."""
-            text = text.lower().replace("\n", " ").replace("*", " ")
-            # Check for DNA+RNA first (must be before individual checks)
-            if "dna" in text and "rna" in text and "+" in text:
-                return "dna+rna"
-            if "dnaandrna" in text.replace(" ", ""):
-                return "dna+rna"
-            if "_rna" in text or " rna" in text or text.endswith("rna"):
-                return "rna"
-            return "dna"
-
-        for col in sample_cols:
-            col_lower = col.lower()
-            col_keys = {
-                self._normalize_sample_key(col),
-                self._normalize_sample_key(self._extract_primary_sample_token(col) or ""),
-            }
-            col_keys = {k for k in col_keys if k}
-
-            matched_info: Optional[InjectionInfo] = None
-            for key in col_keys:
-                if key in info_by_key:
-                    matched_info = info_by_key[key]
-                    break
-
-            if matched_info is None:
-                for info in filtered_injection_list:
-                    file_lower = info.file_name.lower().replace("\n", " ")
-
-                    # Match by BC ID with type prefix and variant (DNA/RNA/DNAandRNA)
-                    bc_match_col = re.search(r"(tumor|normal|benign|benignfat)?(bc\d+)", col_lower)
-                    bc_match_file = re.search(
-                        r"(tumor|normal|benign)\s*(tissue)?\s*(fat\s*)?(bc\d+)", file_lower
-                    )
-
-                    if bc_match_col and bc_match_file:
-                        col_prefix = bc_match_col.group(1) or ""
-                        col_id = bc_match_col.group(2)
-                        col_variant = detect_variant(col_lower)
-
-                        file_prefix = bc_match_file.group(1) or ""
-                        file_id = bc_match_file.group(4)
-                        file_variant = detect_variant(file_lower)
-
-                        # Normalize prefix (benignfat -> benign)
-                        if "benign" in col_prefix:
-                            col_prefix = "benign"
-
-                        if (
-                            col_id == file_id
-                            and col_prefix == file_prefix
-                            and col_variant == file_variant
-                        ):
-                            matched_info = info
-                            break
-
-                    # Match by QC number
-                    qc_match_col = re.search(r"(pooled_?)?qc_?(\d+)", col_lower)
-                    qc_match_file = re.search(r"(pooled_?)?qc_?(\d+)", file_lower)
-                    if qc_match_col and qc_match_file:
-                        if qc_match_col.group(2) == qc_match_file.group(2):
-                            matched_info = info
-                            break
-
-            col_to_info_map[col] = matched_info
-
-            # Get sample type from the Sample_Type row
-            sample_type = sample_type_row.get(col, "sample")
-            identity = build_sample_info_identity(
-                col,
-                matched_info.file_name if matched_info else None,
-            )
-
-            sample_info_data.append(
-                {
-                    "Sample_Name": identity.sample_name,
-                    "Sample_Type": sample_type,
-                    "Injection_Order": matched_info.injection_order if matched_info else 999,
-                    "Injection_Volume": matched_info.injection_volume if matched_info else 0,
-                    "Method_Sample_Name": identity.method_sample_name,
-                    "_col_name": col,  # Internal: for column reordering
-                }
-            )
-
-        # Create DataFrame and sort by Injection_Order
-        sample_info_df = pd.DataFrame(sample_info_data)
-        sample_info_df = sample_info_df.sort_values("Injection_Order").reset_index(drop=True)
-
-        # Ensure SampleInfo headers exist and follow expected order
-        display_cols = [
-            "Sample_Name",
-            "Method_Sample_Name",
-            "Sample_Type",
-            "Injection_Order",
-            "Batch",
-            "Injection_Volume",
-            "DNA_mg/20uL",
-        ]
-        for col in display_cols:
-            if col not in sample_info_df.columns:
-                sample_info_df[col] = np.nan
-
-        extra_cols = [
-            c for c in sample_info_df.columns if c not in display_cols and c != "_col_name"
-        ]
-        ordered_cols = display_cols + extra_cols
-        if "_col_name" in sample_info_df.columns:
-            ordered_cols.append("_col_name")
-        sample_info_df = sample_info_df[ordered_cols]
-
-        return sample_info_df
+        """Compatibility wrapper for SampleInfo construction."""
+        return self._sample_info_builder.build(df, injection_info_list)
 
     def _reorder_columns_by_injection(
         self,
