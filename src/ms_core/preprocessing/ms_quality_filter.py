@@ -15,8 +15,15 @@ import pandas as pd
 import numpy as np
 
 from ms_core.preprocessing.base import BaseProcessor, ProcessingResult
+from ms_core.preprocessing.detection_ratios import DetectionRatioCalculator
+from ms_core.preprocessing.feature_filter_decisions import (
+    FeatureFilterDecisionTable,
+    FeatureFilterOptions,
+    FeatureFilterThresholds,
+)
+from ms_core.preprocessing.feature_filter_output import FeatureFilterOutputBuilder
+from ms_core.preprocessing.feature_groups import FeatureGroupDetector
 from ms_core.preprocessing.settings import FeatureFilterConfig
-from ms_core.utils.validators import detect_fixed_columns
 
 
 class FeatureFilter(BaseProcessor):
@@ -196,24 +203,8 @@ class FeatureFilter(BaseProcessor):
                 numeric_block,
             )
 
-            # Step 4: Convert 0 → NaN in sample/QC columns
-            # Zero means "not detected" and should be treated as missing
-            # to avoid corrupting downstream log-transform and fold-change.
+            # Step 4: zero-to-NaN conversion is handled by FeatureFilterOutputBuilder.
             self.update_progress(85, "Converting zeros to NaN...")
-            all_data_cols = []
-            for cols in group_info["groups"].values():
-                all_data_cols.extend(cols)
-            all_data_cols.extend(group_info.get("qc_cols", []))
-            if all_data_cols:
-                for col_idx in all_data_cols:
-                    col_name = result_df.columns[col_idx]
-                    series = pd.to_numeric(result_df[col_name].iloc[1:], errors="coerce")
-                    zeros_converted = int((series == 0).sum())
-                    series = series.replace(0, np.nan)
-                    result_df[col_name] = [result_df.iat[0, col_idx]] + series.tolist()
-                    filter_stats.setdefault("zeros_converted_to_nan", 0)
-                    filter_stats["zeros_converted_to_nan"] += zeros_converted
-
             self.update_progress(100, "Feature filtering complete")
 
             # Compile statistics
@@ -268,42 +259,7 @@ class FeatureFilter(BaseProcessor):
 
         Returns dict with group information.
         """
-        info = {
-            "groups": {},  # group_name -> list of column indices
-            "qc_cols": [],
-            "excluded_cols": [],
-            "unknown_types": set(),
-            "has_qc": False,
-        }
-
-        excluded_types = set(t.lower() for t in self.config.excluded_types)
-
-        # Row 0 contains sample types (Sample_Type row)
-        sample_type_row = 0
-
-        fixed_cols, start_idx = detect_fixed_columns(df)
-        if not fixed_cols:
-            start_idx = 1
-
-        for col_idx in range(start_idx, len(df.columns)):
-            col_name = df.columns[col_idx]
-            sample_type = str(df.iat[sample_type_row, col_idx]).lower().strip()
-
-            if sample_type in ["", "nan", "na", "none"]:
-                continue
-
-            if sample_type == "qc":
-                info["qc_cols"].append(col_idx)
-                info["has_qc"] = True
-            elif sample_type in excluded_types:
-                info["excluded_cols"].append(col_idx)
-            else:
-                # Analysis group
-                if sample_type not in info["groups"]:
-                    info["groups"][sample_type] = []
-                info["groups"][sample_type].append(col_idx)
-
-        return info
+        return FeatureGroupDetector(self.config).detect(df)
 
     def count_analysis_groups(self, df: pd.DataFrame) -> int:
         """Count the number of non-QC analysis groups in df.
@@ -328,63 +284,7 @@ class FeatureFilter(BaseProcessor):
             - numeric_block dict with 'values' (numpy array), 'all_cols' (sorted col indices),
               'col_pos' (col_idx -> position mapping) for reuse in _filter_features
         """
-        ratio_cols = {}
-        signal_threshold = self.config.signal_threshold
-
-        # Build numeric block once for all groups/QC
-        all_cols_set = set()
-        for cols in group_info["groups"].values():
-            all_cols_set.update(cols)
-        all_cols_set.update(group_info.get("qc_cols", []))
-        all_cols = sorted(all_cols_set)
-        col_pos = {col_idx: pos for pos, col_idx in enumerate(all_cols)}
-        if all_cols:
-            block_all = df.iloc[1:, all_cols].apply(pd.to_numeric, errors="coerce")
-            block_all_values = block_all.to_numpy()
-        else:
-            block_all_values = np.zeros((len(df) - 1, 0))
-
-        # Add ratio columns for each group (vectorized)
-        for group_name, col_indices in group_info["groups"].items():
-            ratio_col = f"{group_name}_ratio"
-            ratio_cols[group_name] = ratio_col
-
-            if not col_indices:
-                df[ratio_col] = ["na"] + [0] * (len(df) - 1)
-                continue
-
-            pos = [col_pos[c] for c in col_indices]
-            block = block_all_values[:, pos]
-            signal_count = (block >= signal_threshold).sum(axis=1)
-            total_count = len(pos)
-            ratios = signal_count / total_count if total_count > 0 else np.zeros(len(signal_count))
-            df[ratio_col] = ["na"] + ratios.tolist()
-
-        # Add QC ratio if QC samples exist (vectorized)
-        if group_info["has_qc"]:
-            qc_ratio_col = "QC_ratio"
-            ratio_cols["QC"] = qc_ratio_col
-
-            qc_cols = group_info["qc_cols"]
-            if qc_cols:
-                pos = [col_pos[c] for c in qc_cols]
-                block = block_all_values[:, pos]
-                signal_count = (block >= signal_threshold).sum(axis=1)
-                total_count = len(pos)
-                qc_ratios = (
-                    signal_count / total_count if total_count > 0 else np.zeros(len(signal_count))
-                )
-                df[qc_ratio_col] = ["na"] + qc_ratios.tolist()
-            else:
-                df[qc_ratio_col] = ["na"] + [0] * (len(df) - 1)
-
-        numeric_block = {
-            "values": block_all_values,
-            "all_cols": all_cols,
-            "col_pos": col_pos,
-        }
-
-        return df, ratio_cols, numeric_block
+        return DetectionRatioCalculator(self.config).calculate(df, group_info)
 
     def _filter_features(
         self,
@@ -409,194 +309,30 @@ class FeatureFilter(BaseProcessor):
 
         Returns filtered DataFrame, deleted rows, and statistics.
         """
-        stats = {
-            "kept_count": 0,
-            "deleted_count": 0,
-            "stable_kept": 0,
-            "mnar_kept": 0,
-            "intensity_fc_kept": 0,
-            "qc_zero_deleted": 0,
-            "qc_low_deleted": 0,
-            "protected_kept": 0,
-            "unique_stable_kept": 0,
-            "unique_mnar_kept": 0,
-            "unique_intensity_fc_kept": 0,
-        }
-
-        deleted_features = []
-        rows_to_keep = [0]  # Always keep Sample_Type row
-
-        group_names = list(group_info["groups"].keys())
-        has_qc = group_info["has_qc"]
-        qc_ratio_col = ratio_cols.get("QC")
-
-        # Build ratio matrix (rows: features, cols: groups)
-        ratio_matrix = []
-        for group_name in group_names:
-            ratio_col = ratio_cols[group_name]
-            ratio_series = pd.to_numeric(df[ratio_col].iloc[1:], errors="coerce").fillna(0)
-            ratio_matrix.append(ratio_series.to_numpy())
-
-        if ratio_matrix:
-            ratio_matrix = np.vstack(ratio_matrix).T  # shape: (n_rows, n_groups)
-        else:
-            ratio_matrix = np.zeros((len(df) - 1, 0))
-
-        # QC ratios
-        if has_qc and qc_ratio_col:
-            qc_ratio = (
-                pd.to_numeric(df[qc_ratio_col].iloc[1:], errors="coerce").fillna(0).to_numpy()
-            )
-        else:
-            qc_ratio = np.ones(len(df) - 1)
-
-        protected_mask = np.zeros(len(df) - 1, dtype=bool)
-        for idx in protected_rows:
-            if idx > 0 and idx < len(df):
-                protected_mask[idx - 1] = True
-
-        if enable_qc_ratio_threshold:
-            qc_zero = qc_ratio == 0
-            qc_low = (
-                (qc_ratio < qc_ratio_threshold) & (qc_ratio > 0)
-                if has_qc and qc_ratio_threshold > 0
-                else np.zeros(len(df) - 1, dtype=bool)
-            )
-        else:
-            qc_zero = np.zeros(len(df) - 1, dtype=bool)
-            qc_low = np.zeros(len(df) - 1, dtype=bool)
-
-        n_features = len(df) - 1
-
-        # --- Ratio-based gates ---
-        if ratio_matrix.shape[1] > 0:
-            # Wilson CI correction for small biological groups (N < 10).
-            # For groups with fewer than 10 samples, replace the raw observed
-            # proportion with the 95% Wilson CI lower bound before applying
-            # any threshold comparison.  This prevents unreliable high
-            # proportions (e.g. 4/5 = 80%) from passing thresholds when
-            # the sample count is too small to trust the point estimate.
-            # N >= 10 groups use the raw ratio unchanged.
-            effective_matrix = ratio_matrix.copy()
-            for j, gname in enumerate(group_names):
-                n_g = len(group_info["groups"][gname])
-                if n_g < self._SMALL_N_THRESHOLD:
-                    effective_matrix[:, j] = self._wilson_lower_vec(ratio_matrix[:, j], n_g)
-
-            # MNAR 80/20 gate: at least one group >= high_det_thresh AND
-            # at least one other group <= low_det_thresh.
-            # Because high_det_thresh > low_det_thresh, a single value cannot
-            # satisfy both conditions, so the "other group" constraint holds.
-            # Requires enable_mnar_gate=True and at least 2 groups.
-            # High side uses effective_matrix (Wilson-corrected); low side
-            # uses raw ratio_matrix (absence signal should not be inflated).
-            mnar_keep = (
-                (effective_matrix >= high_det_thresh).any(axis=1)
-                & (ratio_matrix <= low_det_thresh).any(axis=1)
-                if (enable_mnar_gate and ratio_matrix.shape[1] >= 2)
-                else np.zeros(n_features, dtype=bool)
-            )
-            if enable_background_threshold:
-                n_groups = ratio_matrix.shape[1]
-                # Degrade to single-group check when exactly 1 group and
-                # the caller has confirmed this intentional fallback.
-                required_groups = 1 if (allow_single_group_stable and n_groups == 1) else 2
-                stable_keep = (effective_matrix >= bg_threshold).sum(axis=1) >= required_groups
-            else:
-                stable_keep = np.zeros(n_features, dtype=bool)
-        else:
-            mnar_keep = np.zeros(n_features, dtype=bool)
-            stable_keep = np.zeros(n_features, dtype=bool)
-
-        # --- Intensity fold-change gate ---
-        if enable_intensity_fc_threshold and ratio_matrix.shape[1] >= 2:
-            block_values = numeric_block["values"]
-            col_pos = numeric_block["col_pos"]
-            intensity_means = []
-            for group_name in group_names:
-                col_indices = group_info["groups"][group_name]
-                pos = [col_pos[c] for c in col_indices]
-                group_block = block_values[:, pos]
-                intensity_means.append(np.nanmean(group_block, axis=1))
-            intensity_matrix = np.column_stack(intensity_means)
-
-            safe_matrix = np.where(intensity_matrix > 0, intensity_matrix, np.nan)
-            max_mean = np.nanmax(safe_matrix, axis=1)
-            min_mean = np.nanmin(safe_matrix, axis=1)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                fold_change = np.where(min_mean > 0, max_mean / min_mean, np.inf)
-            # All-NaN rows (no signal in any group) → fail
-            fold_change = np.where(np.isnan(fold_change), 0.0, fold_change)
-            intensity_fc_keep = fold_change >= intensity_fc_threshold
-        else:
-            intensity_fc_keep = np.zeros(n_features, dtype=bool)
-
-        # --- Combine positive rules (OR) ---
-        positive_rules = []
-        if enable_background_threshold:
-            positive_rules.append(stable_keep)
-        positive_rules.append(mnar_keep)
-        if enable_intensity_fc_threshold:
-            positive_rules.append(intensity_fc_keep)
-
-        if positive_rules:
-            keep_mask = protected_mask | np.logical_or.reduce(positive_rules)
-        else:
-            keep_mask = np.ones(n_features, dtype=bool)
-
-        # MNAR 80/20 markers are allowed to survive QC-negative gates because
-        # pooled-QC dilution can push true presence/absence features below LOD.
-        qc_force_delete = (qc_zero | qc_low) & ~protected_mask & ~mnar_keep
-        keep_mask = np.where(qc_force_delete, False, keep_mask)
-
-        # Update stats
-        non_protected = ~protected_mask
-        effective = non_protected & ~qc_force_delete
-
-        stats["protected_kept"] = int(protected_mask.sum())
-        stats["stable_kept"] = int((stable_keep & non_protected).sum())
-        stats["mnar_kept"] = int((mnar_keep & non_protected).sum())
-        stats["intensity_fc_kept"] = int((intensity_fc_keep & non_protected).sum())
-        stats["unique_stable_kept"] = int(
-            (stable_keep & ~mnar_keep & ~intensity_fc_keep & effective).sum()
+        thresholds = FeatureFilterThresholds(
+            background=bg_threshold,
+            high_det=high_det_thresh,
+            low_det=low_det_thresh,
+            qc_ratio=qc_ratio_threshold,
+            intensity_fc=intensity_fc_threshold,
         )
-        stats["unique_mnar_kept"] = int(
-            (mnar_keep & ~stable_keep & ~intensity_fc_keep & effective).sum()
+        options = FeatureFilterOptions(
+            enable_background=enable_background_threshold,
+            enable_qc_ratio=enable_qc_ratio_threshold,
+            enable_intensity_fc=enable_intensity_fc_threshold,
+            enable_mnar=enable_mnar_gate,
+            allow_single_group_stable=allow_single_group_stable,
         )
-        stats["unique_intensity_fc_kept"] = int(
-            (intensity_fc_keep & ~stable_keep & ~mnar_keep & effective).sum()
+        decision = FeatureFilterDecisionTable().decide(
+            df,
+            group_info,
+            ratio_cols,
+            thresholds,
+            options,
+            protected_rows,
+            numeric_block,
         )
-        stats["qc_zero_deleted"] = int((qc_zero & non_protected & ~mnar_keep).sum())
-        stats["qc_low_deleted"] = int((qc_low & non_protected & ~mnar_keep).sum())
-
-        # Build keep rows
-        for i, keep in enumerate(keep_mask, start=1):
-            if keep:
-                rows_to_keep.append(i)
-                stats["kept_count"] += 1
-            else:
-                deleted_features.append(df.iloc[i].copy())
-                stats["deleted_count"] += 1
-
-        # Build mapping for kept rows (for protected row updates)
-        row_mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(rows_to_keep)}
-        stats["red_font_rows"] = sorted(
-            row_mapping[idx] for idx in protected_rows if idx in row_mapping
-        )
-
-        # Filter DataFrame — .copy() ensures writable backing array (avoids numpy read-only error)
-        result_df = df.iloc[rows_to_keep].reset_index(drop=True).copy()
-
-        # Append is_Presence_Absence_Marker column.
-        # rows_to_keep[0] is always 0 (Sample_Type header row).
-        # rows_to_keep[1:] are 1-based row indices into the original df;
-        # subtract 1 to get 0-based indices into mnar_keep.
-        mnar_col = ["is_Presence_Absence_Marker"]
-        for orig_row_idx in rows_to_keep[1:]:
-            mnar_col.append(bool(mnar_keep[orig_row_idx - 1]))
-        result_df.insert(len(result_df.columns), "is_Presence_Absence_Marker", mnar_col)
-
-        return result_df, deleted_features, stats
+        return FeatureFilterOutputBuilder().build(df, group_info, decision, protected_rows)
 
     @staticmethod
     def _wilson_lower_vec(p: np.ndarray, n: int, z: float = 1.96) -> np.ndarray:
@@ -610,13 +346,7 @@ class FeatureFilter(BaseProcessor):
         Returns:
             Array of lower-bound proportions, clipped to [0, 1].
         """
-        if n == 0:
-            return np.zeros_like(p, dtype=float)
-        z2 = z * z
-        n_f = float(n)
-        numerator = p + z2 / (2 * n_f) - z * np.sqrt(p * (1 - p) / n_f + z2 / (4 * n_f * n_f))
-        denominator = 1.0 + z2 / n_f
-        return np.clip(numerator / denominator, 0.0, 1.0)
+        return FeatureFilterDecisionTable.wilson_lower_vec(p, n, z)
 
     def _get_max_ratio_diff(self, ratios: List[float]) -> float:
         """Calculate maximum difference between any two ratios."""

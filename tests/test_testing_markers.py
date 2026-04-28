@@ -13,10 +13,22 @@ def test_algorithm_marker_selects_processing_regressions() -> None:
     data_organizer = classify_test_markers(
         Path("tests") / "test_data_organizer_false_positive_fix.py"
     )
+    degeneracy = classify_test_markers(Path("tests") / "test_degeneracy_annotation.py")
+    detection_ratios = classify_test_markers(Path("tests") / "test_detection_ratios.py")
+    duplicate_merge = classify_test_markers(Path("tests") / "test_duplicate_intensity_merge.py")
+    filter_decisions = classify_test_markers(Path("tests") / "test_feature_filter_decisions.py")
+    filter_output = classify_test_markers(Path("tests") / "test_feature_filter_output.py")
+    feature_groups = classify_test_markers(Path("tests") / "test_feature_groups.py")
 
     assert combined_tsv == {"algorithm"}
     assert feature_filter == {"algorithm"}
     assert data_organizer == {"algorithm"}
+    assert degeneracy == {"algorithm"}
+    assert detection_ratios == {"algorithm"}
+    assert duplicate_merge == {"algorithm"}
+    assert filter_decisions == {"algorithm"}
+    assert filter_output == {"algorithm"}
+    assert feature_groups == {"algorithm"}
 
 
 def test_io_marker_selects_storage_and_cache_contracts() -> None:

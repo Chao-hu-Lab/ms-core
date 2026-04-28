@@ -8,7 +8,13 @@ ALGORITHM_TEST_FILES = frozenset(
     {
         "test_combined_tsv_preprocessor.py",
         "test_data_organizer_false_positive_fix.py",
+        "test_degeneracy_annotation.py",
+        "test_detection_ratios.py",
+        "test_duplicate_intensity_merge.py",
+        "test_feature_filter_decisions.py",
+        "test_feature_filter_output.py",
         "test_feature_filter_small_n.py",
+        "test_feature_groups.py",
     }
 )
 

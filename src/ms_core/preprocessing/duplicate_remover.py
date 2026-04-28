@@ -10,17 +10,16 @@ This module handles intelligent duplicate signal removal:
 Based on: ms-data-processor (https://github.com/bosschen0429/ms-data-processor)
 """
 
-from pathlib import Path
-from typing import Optional, Dict, Any, List, Set, Tuple, Literal, cast
+from typing import Optional, Dict, Any, List, Set, Tuple
 import pandas as pd
 import numpy as np
 
 from ms_core.preprocessing.base import BaseProcessor, ProcessingResult
+from ms_core.preprocessing.degeneracy_annotation import DegeneracyAnnotator
+from ms_core.preprocessing.duplicate_intensity_merge import DuplicateIntensityMerger, MergeMode
 from ms_core.preprocessing.settings import DuplicateRemovalConfig
 from ms_core.utils.file_handler import parse_mz_rt_string
 from ms_core.utils.validators import detect_fixed_columns
-
-MergeMode = Literal["fill_gaps", "per_sample_max"]
 
 
 class DuplicateRemover(BaseProcessor):
@@ -376,25 +375,13 @@ class DuplicateRemover(BaseProcessor):
 
     @staticmethod
     def _normalize_merge_mode(merge_mode: str) -> MergeMode:
-        """Validate and normalize duplicate-row merge policy."""
-        normalized = str(merge_mode).strip().lower()
-        valid_modes: Set[str] = {"fill_gaps", "per_sample_max"}
-        if normalized not in valid_modes:
-            valid_list = ", ".join(sorted(valid_modes))
-            raise ValueError(f"Unsupported merge_mode '{merge_mode}'. Expected one of: {valid_list}")
-        return cast(MergeMode, normalized)
+        """Compatibility wrapper for duplicate-row merge policy validation."""
+        return DuplicateIntensityMerger.normalize_merge_mode(merge_mode)
 
     @staticmethod
     def _coerce_positive_number(value: Any) -> float | None:
-        """Return a positive numeric value, or None for zero/NaN/non-numeric cells."""
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError):
-            return None
-
-        if pd.isna(numeric_value) or numeric_value <= 0:
-            return None
-        return numeric_value
+        """Compatibility wrapper for positive numeric cell coercion."""
+        return DuplicateIntensityMerger.coerce_positive_number(value)
 
     def _is_numeric_column(self, series: pd.Series) -> bool:
         """Check if a series contains numeric values.
@@ -583,88 +570,8 @@ class DuplicateRemover(BaseProcessor):
         intensity_cols: List[str],
         merge_mode: MergeMode,
     ) -> Tuple[pd.DataFrame, Dict[str, int]]:
-        """
-        Merge intensity data from donor rows into the representative row.
-
-        ``fill_gaps`` keeps legacy behavior: only fill zero/NaN cells on the
-        representative row.
-
-        ``per_sample_max`` collapses each duplicate group by taking the
-        highest positive sample value across the representative and donor rows.
-        This avoids losing signal when the same feature was split into multiple
-        rows but should still remain a single row downstream.
-
-        Protected rows affect which row survives as the representative, but
-        they do not freeze the representative's per-sample intensities.
-
-        Args:
-            df: DataFrame with all rows still present
-            merge_groups: list of [best_idx, donor1_idx, ...] from _find_unique_signals
-            intensity_cols: sample intensity column names
-
-        Returns:
-            Modified DataFrame (in-place) and merge statistics
-        """
-        merge_stats = {
-            "groups_merged": 0,
-            "data_points_recovered": 0,
-            "data_points_upgraded": 0,
-        }
-
-        if not merge_groups or not intensity_cols:
-            return df, merge_stats
-
-        for group in merge_groups:
-            best_idx = group[0]
-            donor_indices = group[1:]
-            recovered_in_group = 0
-            upgraded_in_group = 0
-
-            for col in intensity_cols:
-                best_raw = df.at[best_idx, col]
-                best_numeric = self._coerce_positive_number(best_raw)
-
-                if merge_mode == "fill_gaps":
-                    if best_numeric is not None:
-                        continue
-                    for donor_idx in donor_indices:
-                        donor_raw = df.at[donor_idx, col]
-                        donor_numeric = self._coerce_positive_number(donor_raw)
-                        if donor_numeric is None:
-                            continue
-                        df.at[best_idx, col] = donor_raw
-                        recovered_in_group += 1
-                        break
-                    continue
-
-                selected_raw = best_raw
-                selected_numeric = best_numeric
-                selected_from_donor = False
-                for donor_idx in donor_indices:
-                    donor_raw = df.at[donor_idx, col]
-                    donor_numeric = self._coerce_positive_number(donor_raw)
-                    if donor_numeric is None:
-                        continue
-                    if selected_numeric is None or donor_numeric > selected_numeric:
-                        selected_raw = donor_raw
-                        selected_numeric = donor_numeric
-                        selected_from_donor = True
-
-                if not selected_from_donor:
-                    continue
-
-                df.at[best_idx, col] = selected_raw
-                if best_numeric is None:
-                    recovered_in_group += 1
-                else:
-                    upgraded_in_group += 1
-
-            if recovered_in_group > 0 or upgraded_in_group > 0:
-                merge_stats["groups_merged"] += 1
-                merge_stats["data_points_recovered"] += recovered_in_group
-                merge_stats["data_points_upgraded"] += upgraded_in_group
-
-        return df, merge_stats
+        """Compatibility wrapper for delegated duplicate intensity merge policy."""
+        return DuplicateIntensityMerger().merge(df, merge_groups, intensity_cols, merge_mode)
 
     def get_duplicate_groups(
         self,
@@ -737,194 +644,25 @@ class DuplicateRemover(BaseProcessor):
         min_correlation_points: int,
         adduct_table_file: Optional[str],
     ) -> Tuple[pd.DataFrame, Dict[str, Any], str]:
-        """Annotate adduct-like degeneracy relationships on the deduplicated matrix."""
-        annotated = df.copy()
-        annotation_cols = {
-            "Degeneracy_Type": "None",
-            "Degeneracy_Description": "",
-            "Degeneracy_Base_mz": "",
-            "Degeneracy_PPM_Error": "",
-            "Degeneracy_Group_Role": "singleton",
-            "Degeneracy_Group_ID": "",
-            "Degeneracy_Pearson_R": "",
-        }
-        for col, default in annotation_cols.items():
-            annotated[col] = default
-
-        if len(annotated) == 0:
-            return (
-                annotated,
-                {
-                    "degeneracy_annotation_enabled": True,
-                    "degeneracy_matches": 0,
-                    "degeneracy_groups": 0,
-                    "degeneracy_base_count": 0,
-                    "degeneracy_adduct_count": 0,
-                    "degeneracy_corr_rejected": 0,
-                },
-                "empty",
-            )
-
-        adduct_table, source = self._load_adduct_table(adduct_table_file)
-        if adduct_table.empty:
-            return (
-                annotated,
-                {
-                    "degeneracy_annotation_enabled": True,
-                    "degeneracy_matches": 0,
-                    "degeneracy_groups": 0,
-                    "degeneracy_base_count": 0,
-                    "degeneracy_adduct_count": 0,
-                    "degeneracy_corr_rejected": 0,
-                },
-                source,
-            )
-
-        valid = annotated[
-            annotated["_mz"].notna() & annotated["_rt"].notna() & (annotated["_mz"] > 0)
-        ].copy()
-        if valid.empty:
-            return (
-                annotated,
-                {
-                    "degeneracy_annotation_enabled": True,
-                    "degeneracy_matches": 0,
-                    "degeneracy_groups": 0,
-                    "degeneracy_base_count": 0,
-                    "degeneracy_adduct_count": 0,
-                    "degeneracy_corr_rejected": 0,
-                },
-                source,
-            )
-
-        correlation_cols = self._select_degeneracy_correlation_columns(sample_type_row, col_info)
-        valid = valid.sort_values(["_rt", "_mz", "_total_intensity"], ascending=[True, True, False])
-        pair_matches: dict[int, list[dict[str, Any]]] = {}
-        base_matches: dict[int, list[dict[str, Any]]] = {}
-        corr_rejected = 0
-
-        rows = list(valid.iterrows())
-        for i, current in enumerate(rows):
-            j = i + 1
-            while j < len(rows):
-                other = rows[j]
-                current_idx, current_row = current
-                other_idx, other_row = other
-                rt_diff = float(other_row["_rt"] - current_row["_rt"])
-                if rt_diff > rt_tolerance:
-                    break
-
-                base, pair = (
-                    (current, other) if current_row["_mz"] <= other_row["_mz"] else (other, current)
-                )
-                base_idx, base_row = base
-                pair_idx, pair_row = pair
-                mz_diff = float(pair_row["_mz"] - base_row["_mz"])
-                match = self._find_best_adduct_match(
-                    mz_diff,
-                    float(max(base_row["_mz"], pair_row["_mz"])),
-                    adduct_table,
-                    ppm_tolerance,
-                )
-                if match is not None:
-                    corr_value = self._compute_feature_correlation(
-                        annotated,
-                        int(base_idx),
-                        int(pair_idx),
-                        correlation_cols,
-                        min_correlation_points,
-                    )
-                    if corr_value is None or corr_value < correlation_threshold:
-                        corr_rejected += 1
-                        j += 1
-                        continue
-                    payload = {
-                        "base_idx": int(base_idx),
-                        "base_mz": float(base_row["_mz"]),
-                        "adduct_type": match["To"],
-                        "ppm_error": float(match["ppm_error"]),
-                        "corr_value": float(corr_value),
-                    }
-                    pair_matches.setdefault(int(pair_idx), []).append(payload)
-                    base_matches.setdefault(int(base_idx), []).append(payload)
-                j += 1
-
-        group_counter = 1
-        assigned_bases: set[int] = set()
-        for pair_idx in sorted(pair_matches):
-            matches = sorted(
-                pair_matches[pair_idx], key=lambda item: (item["ppm_error"], item["base_mz"])
-            )
-            adduct_types = "; ".join(match["adduct_type"] for match in matches)
-            base_mz_values = "; ".join(f"{match['base_mz']:.4f}" for match in matches)
-            ppm_values = "; ".join(f"{match['ppm_error']:.2f}" for match in matches)
-            corr_values = "; ".join(f"{match['corr_value']:.3f}" for match in matches)
-            descriptions = "; ".join(
-                f"{match['adduct_type']} of base m/z {match['base_mz']:.4f} (r={match['corr_value']:.3f})"
-                for match in matches
-            )
-            group_id = f"DG{group_counter:04d}"
-            annotated.at[pair_idx, "Degeneracy_Type"] = adduct_types
-            annotated.at[pair_idx, "Degeneracy_Description"] = descriptions
-            annotated.at[pair_idx, "Degeneracy_Base_mz"] = base_mz_values
-            annotated.at[pair_idx, "Degeneracy_PPM_Error"] = ppm_values
-            annotated.at[pair_idx, "Degeneracy_Group_Role"] = "adduct"
-            annotated.at[pair_idx, "Degeneracy_Group_ID"] = group_id
-            annotated.at[pair_idx, "Degeneracy_Pearson_R"] = corr_values
-
-            for match in matches:
-                base_idx = match["base_idx"]
-                if base_idx in assigned_bases:
-                    continue
-                annotated.at[base_idx, "Degeneracy_Type"] = "[M+H]+"
-                annotated.at[base_idx, "Degeneracy_Description"] = (
-                    f"Base peak for degeneracy group {group_id} (best r={match['corr_value']:.3f})"
-                )
-                annotated.at[base_idx, "Degeneracy_Base_mz"] = f"{match['base_mz']:.4f}"
-                annotated.at[base_idx, "Degeneracy_PPM_Error"] = ""
-                annotated.at[base_idx, "Degeneracy_Group_Role"] = "base"
-                annotated.at[base_idx, "Degeneracy_Group_ID"] = group_id
-                annotated.at[base_idx, "Degeneracy_Pearson_R"] = f"{match['corr_value']:.3f}"
-                assigned_bases.add(base_idx)
-            group_counter += 1
-
-        stats = {
-            "degeneracy_annotation_enabled": True,
-            "degeneracy_matches": int(sum(len(v) for v in pair_matches.values())),
-            "degeneracy_groups": int(len(base_matches)),
-            "degeneracy_base_count": int(len(base_matches)),
-            "degeneracy_adduct_count": int(len(pair_matches)),
-            "degeneracy_corr_rejected": int(corr_rejected),
-        }
-        return annotated, stats, source
+        """Compatibility wrapper for delegated degeneracy annotation."""
+        return DegeneracyAnnotator().annotate(
+            df,
+            col_info=col_info,
+            sample_type_row=sample_type_row,
+            ppm_tolerance=ppm_tolerance,
+            rt_tolerance=rt_tolerance,
+            correlation_threshold=correlation_threshold,
+            min_correlation_points=min_correlation_points,
+            adduct_table_file=adduct_table_file,
+        )
 
     def _select_degeneracy_correlation_columns(
         self,
         sample_type_row: pd.Series,
         col_info: Dict[str, Any],
     ) -> List[str]:
-        """Choose columns used for Pearson correlation in degeneracy annotation."""
-        intensity_cols = [
-            str(col) for col in col_info.get("intensity_cols", []) if col in sample_type_row.index
-        ]
-        if not intensity_cols:
-            return intensity_cols
-
-        preferred_cols: List[str] = []
-        fallback_cols: List[str] = []
-        for col in intensity_cols:
-            sample_type = str(sample_type_row.get(col, "")).strip().lower()
-            if sample_type in {"", "nan", "na", "none"}:
-                continue
-            fallback_cols.append(col)
-            if sample_type not in {"qc", "blank", "standard", "sdolek"}:
-                preferred_cols.append(col)
-
-        if len(preferred_cols) >= 3:
-            return preferred_cols
-        if len(fallback_cols) >= 2:
-            return fallback_cols
-        return preferred_cols or fallback_cols
+        """Compatibility wrapper for delegated degeneracy correlation-column selection."""
+        return DegeneracyAnnotator._select_correlation_columns(sample_type_row, col_info)
 
     def _compute_feature_correlation(
         self,
@@ -934,28 +672,14 @@ class DuplicateRemover(BaseProcessor):
         correlation_cols: List[str],
         min_correlation_points: int,
     ) -> Optional[float]:
-        """Compute Pearson correlation on shared positive intensities."""
-        if len(correlation_cols) < 2:
-            return None
-
-        base_series = pd.to_numeric(df.loc[base_idx, correlation_cols], errors="coerce")
-        pair_series = pd.to_numeric(df.loc[pair_idx, correlation_cols], errors="coerce")
-        valid_mask = (
-            base_series.notna() & pair_series.notna() & (base_series > 0) & (pair_series > 0)
+        """Compatibility wrapper for delegated degeneracy Pearson correlation."""
+        return DegeneracyAnnotator._compute_feature_correlation(
+            df,
+            base_idx,
+            pair_idx,
+            correlation_cols,
+            min_correlation_points,
         )
-        shared = int(valid_mask.sum())
-        if shared < max(2, min_correlation_points):
-            return None
-
-        base_vals = np.log1p(base_series[valid_mask].astype(float).to_numpy())
-        pair_vals = np.log1p(pair_series[valid_mask].astype(float).to_numpy())
-        if np.std(base_vals) == 0 or np.std(pair_vals) == 0:
-            return None
-
-        corr = np.corrcoef(base_vals, pair_vals)[0, 1]
-        if np.isnan(corr):
-            return None
-        return float(corr)
 
     def _find_best_adduct_match(
         self,
@@ -964,58 +688,18 @@ class DuplicateRemover(BaseProcessor):
         adduct_table: pd.DataFrame,
         ppm_tolerance: float,
     ) -> Optional[Dict[str, Any]]:
-        """Return the closest adduct-table match within ppm tolerance."""
-        if reference_mz <= 0:
-            return None
-
-        best_match: Optional[Dict[str, Any]] = None
-        tolerance_da = ppm_tolerance * reference_mz / 1_000_000
-
-        for row in adduct_table.itertuples(index=False):
-            delta = float(row.Delta_Da)
-            abs_error = abs(mz_diff - delta)
-            if abs_error > tolerance_da:
-                continue
-            ppm_error = abs_error / reference_mz * 1_000_000
-            candidate = {
-                "To": row.To,
-                "Delta_Da": delta,
-                "ppm_error": ppm_error,
-            }
-            if best_match is None or candidate["ppm_error"] < best_match["ppm_error"]:
-                best_match = candidate
-
-        return best_match
+        """Compatibility wrapper for delegated adduct-table matching."""
+        return DegeneracyAnnotator._find_best_adduct_match(
+            mz_diff,
+            reference_mz,
+            adduct_table,
+            ppm_tolerance,
+        )
 
     def _load_adduct_table(self, custom_file: Optional[str]) -> Tuple[pd.DataFrame, str]:
-        """Load a custom adduct table or fall back to built-in defaults."""
-        if custom_file:
-            path = Path(custom_file)
-            if path.exists():
-                try:
-                    if path.suffix.lower() in {".csv"}:
-                        custom_df = pd.read_csv(path)
-                    elif path.suffix.lower() in {".tsv", ".txt"}:
-                        custom_df = pd.read_csv(path, sep="\t")
-                    else:
-                        custom_df = pd.read_excel(path)
-                    required_cols = {"To", "Delta_Da"}
-                    ordered_cols = ["To", "Delta_Da"]
-                    if required_cols.issubset(custom_df.columns) and not custom_df.empty:
-                        return custom_df[ordered_cols].copy(), str(path)
-                except Exception:
-                    pass
-        return self._create_default_adduct_table(), "built-in"
+        """Compatibility wrapper for delegated adduct-table loading."""
+        return DegeneracyAnnotator()._load_adduct_table(custom_file)
 
     def _create_default_adduct_table(self) -> pd.DataFrame:
-        """Provide a compact default adduct table for v1 degeneracy annotation."""
-        return pd.DataFrame(
-            [
-                {"To": "[M+Na]+", "Delta_Da": 21.981943},
-                {"To": "[M+K]+", "Delta_Da": 37.955882},
-                {"To": "[M+NH4]+", "Delta_Da": 17.026549},
-                {"To": "[M+ACN+H]+", "Delta_Da": 41.026549},
-                {"To": "[M+H]+ isotope", "Delta_Da": 1.003355},
-                {"To": "[M+H]+ isotope +2", "Delta_Da": 2.006710},
-            ]
-        )
+        """Compatibility wrapper for delegated built-in adduct table."""
+        return DegeneracyAnnotator._create_default_adduct_table()
