@@ -13,6 +13,11 @@ def test_algorithm_marker_selects_processing_regressions() -> None:
     data_organizer = classify_test_markers(
         Path("tests") / "test_data_organizer_false_positive_fix.py"
     )
+    data_organizer_contract = classify_test_markers(
+        Path("tests") / "test_data_organizer_facade_contract.py"
+    )
+    data_organizer_layout = classify_test_markers(Path("tests") / "test_data_organizer_layout.py")
+    data_organizer_step1 = classify_test_markers(Path("tests") / "test_data_organizer_step1.py")
     degeneracy = classify_test_markers(Path("tests") / "test_degeneracy_annotation.py")
     detection_ratios = classify_test_markers(Path("tests") / "test_detection_ratios.py")
     duplicate_merge = classify_test_markers(Path("tests") / "test_duplicate_intensity_merge.py")
@@ -23,6 +28,9 @@ def test_algorithm_marker_selects_processing_regressions() -> None:
     assert combined_tsv == {"algorithm"}
     assert feature_filter == {"algorithm"}
     assert data_organizer == {"algorithm"}
+    assert data_organizer_contract == {"algorithm"}
+    assert data_organizer_layout == {"algorithm"}
+    assert data_organizer_step1 == {"algorithm"}
     assert degeneracy == {"algorithm"}
     assert detection_ratios == {"algorithm"}
     assert duplicate_merge == {"algorithm"}
