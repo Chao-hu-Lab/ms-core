@@ -14,9 +14,13 @@ from ms_core.preprocessing.sample_identity import (
     [
         ("BC2286_2", "bc2286"),
         ("DNA_program1_TumorBC2257_DNA", "tumorbc2257_dna"),
+        ("program2_program1_TumorBC2257_DNA", "tumorbc2257_dna"),
+        ("program2_DNA_program1_TumorBC2257_DNA", "tumorbc2257_dna"),
         ("EC013_2", "ec013"),
         ("EC301", "ec0301"),
         ("ZBEE000070", "u00070zbee"),
+        ("ZBEE000070_2", "u00070zbee"),
+        ("U00070ZBEE_2", "u00070zbee"),
         ("QC sample 1", "qc_sample_1"),
         ("DNAandRNA", "dnaandrna"),
     ],

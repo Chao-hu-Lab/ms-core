@@ -23,34 +23,31 @@ Output format (SampleInfo):
 
 import logging
 import re
-import zipfile
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Union
-from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 from ms_core.preprocessing.base import BaseProcessor, ProcessingResult
+from ms_core.preprocessing.method_sequence import (
+    InjectionInfo,
+    extract_docx_tables_fallback,
+    extract_injection_rows_from_table,
+    parse_injection_sequence,
+    parse_injection_volume_from_cells,
+)
 from ms_core.preprocessing.sample_identity import (
     build_sample_info_identity,
-    normalize_sample_token,
+    extract_primary_sample_token,
+    extract_raw_sample_name,
+    is_likely_sample_name,
+    normalize_sample_key,
+    simplify_method_sample_name,
 )
 from ms_core.preprocessing.settings import DataOrganizerConfig
 from ms_core.utils.validators import detect_fixed_columns
-
-
-@dataclass
-class InjectionInfo:
-    """Information about a sample injection from method file."""
-
-    injection_order: int
-    file_name: str
-    sample_name: str
-    injection_volume: float
-    instrument_method: str = ""
 
 
 class DataOrganizer(BaseProcessor):
@@ -74,11 +71,6 @@ class DataOrganizer(BaseProcessor):
         "blank": [r"blank", r"blk"],
         "standard": [r"std", r"standard", r"sdolek"],
     }
-    SAMPLE_TOKEN_REGEX = re.compile(
-        r"(?:EC\d{2,4}(?:_\d+)?|U\d{5}ZBEE|ZBEE\d{6}|pooled[_\s-]*QC[_\s-]*\d+|QC[_\s-]*sample[_\s-]*\d+|QC[_\s-]*\d+|blank)",
-        re.IGNORECASE,
-    )
-
     def __init__(self, config: Optional[DataOrganizerConfig] = None):
         """
         Initialize the Data Organizer.
@@ -224,61 +216,15 @@ class DataOrganizer(BaseProcessor):
 
     def _extract_primary_sample_token(self, text: str) -> Optional[str]:
         """Extract a canonical sample token from free text."""
-        if text is None:
-            return None
-        cleaned = str(text).strip()
-        if not cleaned:
-            return None
-        match = self.SAMPLE_TOKEN_REGEX.search(cleaned)
-        if not match:
-            # BC-style tissue sample naming from breast-cancer method files.
-            # Keep original wording so downstream BC/QC matching can use full context.
-            compact = re.sub(r"\s+", "", cleaned.lower())
-            if re.search(r"bc\d+_dna(?:\+rna|andrna)", compact):
-                return cleaned
-            if re.search(
-                r"\bbc\d+_(?:dna\s*(?:\+\s*|and\s*)rna|dnaandrna|dna\+rna|dna|rna)\b",
-                cleaned,
-                re.IGNORECASE,
-            ):
-                return cleaned
-            # Column-style names such as DNA_program1_TumorBC2257_DNA.
-            if re.search(
-                r"\b(?:dna_)?program\d+_[a-z0-9_]*bc\d+_(?:dnaandrna|dna|rna)\b",
-                cleaned,
-                re.IGNORECASE,
-            ):
-                return cleaned
-            return None
-        token = re.sub(r"\s+", "", match.group(0))
-        token = token.replace("-", "_")
-        return token
+        return extract_primary_sample_token(text)
 
     def _normalize_sample_key(self, sample_name: str) -> str:
         """Normalize sample names from files/headers for robust matching."""
-        if sample_name is None:
-            return ""
-        token = str(sample_name).strip()
-        if not token:
-            return ""
-        token = self._extract_sample_name(token)
-        return normalize_sample_token(token)
+        return normalize_sample_key(sample_name)
 
     def _is_likely_sample_name(self, text: str) -> bool:
         """Identify whether a method-file entry looks like a real sample."""
-        if text is None:
-            return False
-        name_lower = str(text).lower()
-        if "blank" in name_lower or "sdolek" in name_lower or "std" in name_lower:
-            return False
-        if self._extract_primary_sample_token(str(text)):
-            return True
-        return (
-            re.search(r"bc\d+", name_lower) is not None
-            or "qc" in name_lower
-            or "tissue" in name_lower
-            or "pooled" in name_lower
-        )
+        return is_likely_sample_name(text)
 
     def _move_leading_metadata_to_end(self, df: pd.DataFrame) -> pd.DataFrame:
         """Move any leading non-mz/rt metadata columns (e.g. MZmine ID) to the end.
@@ -1316,42 +1262,7 @@ class DataOrganizer(BaseProcessor):
         Returns:
             Simplified sample name
         """
-        # Remove "Intensity of " prefix if present
-        if header.lower().startswith("intensity of "):
-            header = header[13:]
-
-        # Get the filename from the path
-        try:
-            # Handle both Windows and Unix paths
-            path = Path(header)
-            filename = path.stem  # Get filename without extension
-        except Exception as exc:
-            logger.debug("Path parse fallback for header '%s': %s", header, exc)
-            filename = header
-
-        # Try to extract the meaningful part
-        # Pattern: program2_program1_SAMPLENAME.tsv -> SAMPLENAME
-        # Pattern: program2_1\\program2_program1_SAMPLENAME -> SAMPLENAME
-        patterns_to_remove = [
-            r"^.+_program\d+_",  # YYYYMMDD_desc_program2_YYYYMMDD_desc_program1_SAMPLE
-            r"^program\d+_(?:dna|rna)_program\d+_",  # program2_DNA_program1_
-            r"^(?:dna|rna)_program\d+_",  # DNA_program1_, RNA_program1_
-            r"^program\d+_program\d+_",  # program2_program1_
-            r"^program\d+_\d+_",  # program2_1_
-            r"^program\d+_",  # program2_
-        ]
-
-        result = filename
-        for pattern in patterns_to_remove:
-            result = re.sub(pattern, "", result, flags=re.IGNORECASE)
-
-        # Normalize QC naming: QC4 -> QC_4 (standardize with underscore)
-        result = re.sub(r"(qc)[ _-]?(\d+)", r"\1_\2", result, flags=re.IGNORECASE)
-
-        # Clean up any remaining artifacts
-        result = result.strip("_")
-
-        return result if result else filename
+        return extract_raw_sample_name(header)
 
     def _insert_sample_type_row(
         self,
@@ -1478,282 +1389,27 @@ class DataOrganizer(BaseProcessor):
         return df
 
     def _extract_docx_tables_fallback(self, file_path: Union[str, Path]) -> List[List[List[str]]]:
-        """
-        Extract DOCX table cell texts without python-docx.
-
-        This fallback parses word/document.xml directly so the pipeline can still
-        build SampleInfo when python-docx is unavailable.
-        """
-        tables: List[List[List[str]]] = []
-        path = Path(file_path)
-
-        if path.suffix.lower() != ".docx" or not path.exists():
-            return tables
-
-        try:
-            with zipfile.ZipFile(path, "r") as zf:
-                with zf.open("word/document.xml") as fp:
-                    tree = ET.parse(fp)
-            root = tree.getroot()
-            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-
-            for tbl in root.findall(".//w:tbl", ns):
-                parsed_rows: List[List[str]] = []
-                for tr in tbl.findall("./w:tr", ns):
-                    parsed_cells: List[str] = []
-                    for tc in tr.findall("./w:tc", ns):
-                        texts = [t.text for t in tc.findall(".//w:t", ns) if t.text]
-                        parsed_cells.append("".join(texts).strip())
-                    if parsed_cells:
-                        parsed_rows.append(parsed_cells)
-                if parsed_rows:
-                    tables.append(parsed_rows)
-        except Exception as exc:
-            logger.warning("Fallback DOCX parse failed for %s: %s", path, exc)
-
-        return tables
+        """Compatibility wrapper for method sequence DOCX fallback parsing."""
+        return extract_docx_tables_fallback(file_path)
 
     def _parse_injection_volume_from_cells(self, cells: List[str]) -> float:
-        """Parse likely injection volume from a table row."""
-        for cell in reversed(cells):
-            cell_text = str(cell).strip().replace(",", "")
-            if not cell_text:
-                continue
-            try:
-                value = float(cell_text)
-            except ValueError:
-                continue
-            if 0 < value <= 100:
-                return value
-        return 0.0
+        """Compatibility wrapper for method sequence injection-volume parsing."""
+        return parse_injection_volume_from_cells(cells)
 
     def _extract_injection_rows_from_table(
         self,
         table_rows: List[List[str]],
         preserve_source_order: bool = False,
     ) -> List[InjectionInfo]:
-        """
-        Extract injection rows from one table using common layouts.
-
-        Supported layouts:
-        - [Order, Sample, ...]
-        - [Order, Sample, ..., Order, Sample, ...] (dual-column Word table)
-        """
-        injections: List[InjectionInfo] = []
-        candidate_pairs = [(0, 1), (3, 4)]
-
-        for row in table_rows:
-            cells = [str(cell).strip() for cell in row]
-            if len(cells) < 2:
-                continue
-
-            for order_idx, sample_idx in candidate_pairs:
-                if len(cells) <= sample_idx:
-                    continue
-                order_text = cells[order_idx].strip() if len(cells) > order_idx else ""
-                if not re.fullmatch(r"\d{1,4}", order_text):
-                    continue
-
-                sample_cell = cells[sample_idx]
-                sample_text = re.sub(r"\s+", " ", sample_cell).strip()
-                if not sample_text:
-                    continue
-                sample_token = self._extract_primary_sample_token(sample_cell)
-                if not sample_token and not self._is_likely_sample_name(sample_cell):
-                    continue
-
-                instrument_method = ""
-                next_col = sample_idx + 1
-                if len(cells) > next_col:
-                    candidate = re.sub(r"\s+", " ", cells[next_col]).strip()
-                    if candidate and not candidate.isdigit():
-                        instrument_method = candidate
-
-                injection_volume = self._parse_injection_volume_from_cells(cells)
-                sample_name = self._simplify_word_sample_name(sample_text)
-
-                injections.append(
-                    InjectionInfo(
-                        injection_order=int(order_text),
-                        file_name=sample_text,
-                        sample_name=sample_name,
-                        injection_volume=injection_volume,
-                        instrument_method=instrument_method,
-                    )
-                )
-
-        if not injections:
-            return injections
-
-        if preserve_source_order:
-            deduped_source: List[InjectionInfo] = []
-            seen_keys = set()
-            for info in injections:
-                key = self._normalize_sample_key(info.file_name)
-                if not key or key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                deduped_source.append(info)
-            for idx, info in enumerate(deduped_source, start=1):
-                info.injection_order = idx
-            return deduped_source
-
-        deduped: List[InjectionInfo] = []
-        seen = set()
-        for info in sorted(injections, key=lambda x: x.injection_order):
-            dedupe_key = (info.injection_order, self._normalize_sample_key(info.file_name))
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            deduped.append(info)
-        return deduped
+        """Compatibility wrapper for method sequence row extraction."""
+        return extract_injection_rows_from_table(
+            table_rows,
+            preserve_source_order=preserve_source_order,
+        )
 
     def _parse_injection_sequence(self, file_path: Union[str, Path]) -> List[InjectionInfo]:
-        """
-        Parse injection sequence table from Word document.
-
-        Extracts samples in row order (ignoring ID column which may have duplicates
-        due to pagination issues in Word tables).
-
-        Args:
-            file_path: Path to the Word document
-
-        Returns:
-            List of InjectionInfo objects in injection order
-        """
-        injection_list: List[InjectionInfo] = []
-        file_path = Path(file_path)
-
-        if not file_path.exists():
-            return injection_list
-
-        if file_path.suffix.lower() not in [".docx", ".doc"]:
-            return injection_list
-
-        tables: List[List[List[str]]] = []
-        try:
-            from docx import Document
-
-            doc = Document(file_path)
-            for table in doc.tables:
-                table_rows: List[List[str]] = []
-                for row in table.rows:
-                    table_rows.append([cell.text.strip() for cell in row.cells])
-                if table_rows:
-                    tables.append(table_rows)
-        except ImportError:
-            logger.warning(
-                "python-docx not installed; using fallback DOCX parser for injection sequence"
-            )
-            tables = self._extract_docx_tables_fallback(file_path)
-        except Exception as exc:
-            logger.warning(
-                "python-docx parse failed for %s (%s); using fallback parser", file_path, exc
-            )
-            tables = self._extract_docx_tables_fallback(file_path)
-
-        # Find the injection sequence table
-        # Look for table with columns similar to: ID | File Name | Instrument Method | ...
-        target_table = None
-        for table_rows in tables:
-            if len(table_rows) > 10:  # Must have many rows
-                header_cells = [str(cell).strip().lower() for cell in table_rows[0]]
-                if any(
-                    ("file" in h and "name" in h)
-                    or ("filename" in h)
-                    or ("檔" in h)
-                    or ("樣本" in h)
-                    for h in header_cells
-                ):
-                    target_table = table_rows
-                    break
-
-        # Preferred parser: extract (order, sample) pairs directly from candidate table.
-        if target_table is not None:
-            parsed_from_target = self._extract_injection_rows_from_table(target_table)
-            if parsed_from_target:
-                # Some BC method sheets reuse numeric IDs across sections; in that case
-                # source-row order is a better approximation of true injection sequence.
-                order_values = [info.injection_order for info in parsed_from_target]
-                duplicate_orders = len(order_values) - len(set(order_values))
-                bc_like_count = sum(
-                    1
-                    for info in parsed_from_target
-                    if re.search(r"bc\d+", info.file_name, re.IGNORECASE)
-                )
-                if duplicate_orders > 0 and bc_like_count >= 5:
-                    parsed_by_rows = self._extract_injection_rows_from_table(
-                        target_table,
-                        preserve_source_order=True,
-                    )
-                    if parsed_by_rows:
-                        return parsed_by_rows
-                return parsed_from_target
-
-        # Parse the table using ROW ORDER (not ID column)
-        # This handles Word tables where IDs may reset across pages
-        if target_table is not None:
-            row_order = 0
-            for row_idx, row in enumerate(target_table):
-                if row_idx == 0:  # Skip header row
-                    continue
-
-                cells = [str(cell).strip() for cell in row]
-                if len(cells) < 2:
-                    continue
-
-                # Parse file name (sample name) - column 1
-                file_name = cells[1] if len(cells) > 1 else ""
-                # Normalize whitespace/newlines from Word tables
-                file_name = re.sub(r"\s+", " ", file_name).strip()
-                # Keep original underscores; only normalize whitespace
-                if not file_name:
-                    continue
-
-                # Use row order as injection order (will be renumbered later)
-                row_order += 1
-
-                # Parse instrument method (column 2 or 3)
-                instrument_method = ""
-                for i in [2, 3]:
-                    if len(cells) > i and "method" not in cells[i].lower():
-                        if cells[i] and not cells[i].isdigit():
-                            instrument_method = cells[i]
-                            break
-
-                injection_volume = self._parse_injection_volume_from_cells(cells)
-                sample_name = self._simplify_word_sample_name(file_name)
-
-                injection_list.append(
-                    InjectionInfo(
-                        injection_order=row_order,  # Use row order
-                        file_name=file_name,
-                        sample_name=sample_name,
-                        injection_volume=injection_volume,
-                        instrument_method=instrument_method,
-                    )
-                )
-            if injection_list:
-                return injection_list
-
-        # Fallback parser: score all tables and choose the one with the best
-        # (order, sample) extraction coverage.
-        best_list: List[InjectionInfo] = []
-        best_score: Tuple[int, int, int, int] = (-1, -1, -1, -1)
-        for table_rows in tables:
-            parsed = self._extract_injection_rows_from_table(table_rows)
-            if len(parsed) < 5:
-                continue
-
-            unique_orders = len({info.injection_order for info in parsed})
-            unique_samples = len({self._normalize_sample_key(info.file_name) for info in parsed})
-            duplicate_orders = len(parsed) - unique_orders
-            score = (unique_samples, unique_orders, -duplicate_orders, len(parsed))
-            if score > best_score:
-                best_score = score
-                best_list = parsed
-
-        return best_list
+        """Compatibility wrapper for method sequence parsing."""
+        return parse_injection_sequence(file_path)
 
     def _simplify_word_sample_name(self, file_name: str) -> str:
         """
@@ -1771,40 +1427,7 @@ class DataOrganizer(BaseProcessor):
         Returns:
             Simplified sample name that matches column header
         """
-        name = file_name.strip()
-
-        # Handle QC samples: "Breast Cancer Tissue_ pooled_QC_X" -> "pooled_QC_X"
-        if "pooled" in name.lower() and "qc" in name.lower():
-            match = re.search(r"pooled_?QC_?\d+", name, re.IGNORECASE)
-            if match:
-                return match.group().replace(" ", "")
-
-        # Handle tissue samples: "Tumor tissue BC2257_DNA" -> "TumorBC2257_DNA"
-        tissue_patterns = [
-            (r"tumor\s*tissue\s*", "Tumor"),
-            (r"normal\s*tissue\s*", "Normal"),
-            (r"benign\s*tissue\s*(fat\s*)?", "Benign"),
-        ]
-
-        for pattern, prefix in tissue_patterns:
-            match = re.search(pattern, name, re.IGNORECASE)
-            if match:
-                # Extract the BC ID part
-                bc_match = re.search(r"BC\d+_\w+", name, re.IGNORECASE)
-                if bc_match:
-                    return f"{prefix}{bc_match.group()}"
-
-        # Handle blank and standard samples
-        if "blank" in name.lower():
-            match = re.search(r"blank_?\d*", name, re.IGNORECASE)
-            if match:
-                return match.group()
-
-        if "sdolek" in name.lower() or "std" in name.lower():
-            # Return as-is but cleaned
-            return re.sub(r"\s+", "_", name)
-
-        return name
+        return simplify_method_sample_name(file_name)
 
     def _build_sample_info(
         self,
