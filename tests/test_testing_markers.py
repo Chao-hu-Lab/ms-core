@@ -8,11 +8,13 @@ from tests.testing_markers import classify_test_markers
 
 
 def test_algorithm_marker_selects_processing_regressions() -> None:
+    combined_tsv = classify_test_markers(Path("tests") / "test_combined_tsv_preprocessor.py")
     feature_filter = classify_test_markers(Path("tests") / "test_feature_filter_small_n.py")
     data_organizer = classify_test_markers(
         Path("tests") / "test_data_organizer_false_positive_fix.py"
     )
 
+    assert combined_tsv == {"algorithm"}
     assert feature_filter == {"algorithm"}
     assert data_organizer == {"algorithm"}
 
