@@ -175,6 +175,37 @@ def test_falls_back_to_built_in_table_for_missing_or_invalid_custom_table(
             assert adduct_row["Degeneracy_Type"] == "[M+Na]+"
 
 
+def test_falls_back_to_built_in_table_when_custom_table_reader_raises(
+    monkeypatch,
+    project_temp_dir: TempDirFactory,
+) -> None:
+    df, col_info, sample_type_row = _annotation_input()
+    with project_temp_dir("degeneracy-adducts-") as temp_dir:
+        corrupt_workbook = temp_dir / "corrupt_adducts.xlsx"
+        corrupt_workbook.write_bytes(b"not a valid workbook")
+
+        def raise_parser_error(*_args, **_kwargs):
+            raise RuntimeError("workbook parser failed")
+
+        monkeypatch.setattr(pd, "read_excel", raise_parser_error)
+
+        annotated, stats, source = DegeneracyAnnotator().annotate(
+            df,
+            col_info=col_info,
+            sample_type_row=sample_type_row,
+            ppm_tolerance=20,
+            rt_tolerance=0.05,
+            correlation_threshold=0.8,
+            min_correlation_points=3,
+            adduct_table_file=str(corrupt_workbook),
+        )
+
+    adduct_row = annotated[annotated["Mz/RT"] == "264.1010/11.00"].iloc[0]
+    assert source == "built-in"
+    assert stats["degeneracy_adduct_count"] == 1
+    assert adduct_row["Degeneracy_Type"] == "[M+Na]+"
+
+
 def test_duplicate_remover_facade_preserves_degeneracy_process_contract() -> None:
     df = pd.DataFrame(
         {

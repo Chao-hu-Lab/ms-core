@@ -121,3 +121,40 @@ def test_statistics_include_qc_count_and_group_counts() -> None:
     assert result.statistics["qc_count"] == 2
     assert result.statistics["group_counts"]["a"] == 3
     assert result.statistics["group_counts"]["b"] == 5
+
+
+def test_process_facade_preserves_output_builder_contract() -> None:
+    rows: dict[str, list] = {
+        "feature": ["Sample_Type", "stable", "mnar", "deleted"],
+    }
+    for i in range(10):
+        rows[f"a_{i + 1}"] = ["a", 10000, 10000, 10000]
+        rows[f"b_{i + 1}"] = ["b", 10000, 0, 10000]
+    rows["QC_1"] = ["qc", 10000, 10000, 0]
+
+    result = FeatureFilter().process(
+        pd.DataFrame(rows),
+        background_threshold=0.8,
+        high_det_thresh=0.8,
+        low_det_thresh=0.2,
+        qc_ratio_threshold=0.5,
+        enable_background_threshold=True,
+        enable_qc_ratio_threshold=True,
+        enable_mnar_gate=True,
+    )
+
+    assert result.success
+    output = result.data
+    assert output is not None
+    assert output["feature"].tolist() == ["Sample_Type", "stable", "mnar"]
+    assert "a_ratio" in output.columns
+    assert "b_ratio" in output.columns
+    assert "QC_ratio" in output.columns
+    assert output["is_Presence_Absence_Marker"].tolist() == [
+        "is_Presence_Absence_Marker",
+        False,
+        True,
+    ]
+    assert pd.isna(output.loc[2, "b_1"])
+    assert result.metadata["deleted_features"][0]["feature"] == "deleted"
+    assert result.statistics["zeros_converted_to_nan"] == 10

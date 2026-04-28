@@ -229,7 +229,7 @@ class DegeneracyAnnotator:
                     ordered_cols = ["To", "Delta_Da"]
                     if required_cols.issubset(custom_df.columns) and not custom_df.empty:
                         return custom_df[ordered_cols].copy(), str(path)
-                except (OSError, ValueError, ImportError):
+                except Exception:
                     pass
         return self._create_default_adduct_table(), "built-in"
 
