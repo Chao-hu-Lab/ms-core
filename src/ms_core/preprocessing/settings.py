@@ -16,25 +16,7 @@ import tempfile
 class ISTDConfig:
     """Configuration for ISTD Marker module."""
 
-    # Default tolerances for duplicate detection
-    default_ppm_tolerance: float = 20.0
-    default_rt_tolerance: float = 1.0
-
-    # Column names
-    feature_id_col: str = "Mz/RT"
-    tolerance_col: str = "m/z Tolerance( ppm)/RT Tolerance"
     sample_type_col: str = "Sample_Type"
-
-    # Default ISTD m/z list
-    default_istd_mz: list = field(default_factory=lambda: [
-        261.1273,
-        245.1324,
-        289.0841,
-        300.1605,
-        269.1436,
-        482.2087,
-        303.0913,
-    ])
 
 
 @dataclass
