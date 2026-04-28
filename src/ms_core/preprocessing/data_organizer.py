@@ -18,7 +18,7 @@ Output format (RawIntensity):
     252.1098/18.45 | 12345   | 67890   | ...
 
 Output format (SampleInfo):
-    Sample_Name | Sample_Type | Injection_Order | Injection_Volume
+    Sample_Name | Sample_Type | Injection_Order | Injection_Volume | Method_Sample_Name
 """
 
 import logging
@@ -34,6 +34,10 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from ms_core.preprocessing.base import BaseProcessor, ProcessingResult
+from ms_core.preprocessing.sample_identity import (
+    build_sample_info_identity,
+    normalize_sample_token,
+)
 from ms_core.preprocessing.settings import DataOrganizerConfig
 from ms_core.utils.validators import detect_fixed_columns
 
@@ -258,43 +262,7 @@ class DataOrganizer(BaseProcessor):
         if not token:
             return ""
         token = self._extract_sample_name(token)
-        lower = token.lower()
-        lower = re.sub(r"[^a-z0-9]+", "_", lower).strip("_")
-        lower = re.sub(r"_+", "_", lower)
-        # Strip 14-digit datetime stamps appended by instrument software (YYYYMMDDHHMMSS).
-        lower = re.sub(r"_\d{14}$", "", lower)
-
-        # Normalize QC naming variants.
-        lower = re.sub(r"qc[_\s-]*sample[_\s-]*(\d+)", r"qc_sample_\1", lower)
-        lower = re.sub(r"^qc[_\s-]*(\d+)$", r"qc_sample_\1", lower)
-        lower = re.sub(r"pooled[_\s-]*qc[_\s-]*(\d+)", r"pooled_qc_\1", lower)
-
-        # Normalize technical prefixes in column exports.
-        lower = re.sub(r"^(?:dna|rna)_program\d+_", "", lower)
-        lower = re.sub(r"^program\d+_", "", lower)
-        lower = re.sub(r"dna_(?:and_)?rna", "dnaandrna", lower)
-        lower = re.sub(r"dna_rna", "dnaandrna", lower)
-
-        # Normalize ZBEE000070 -> U00070ZBEE.
-        zbee_match = re.fullmatch(r"zbee(\d{6})", lower)
-        if zbee_match:
-            lower = f"u{int(zbee_match.group(1)):05d}zbee"
-
-        # Normalize EC301 -> EC0301 and EC013_2 -> EC013.
-        ec_suffix_match = re.fullmatch(r"(ec\d{2,4})_\d+", lower)
-        if ec_suffix_match:
-            lower = ec_suffix_match.group(1)
-        ec_match = re.fullmatch(r"ec(\d{2,4})", lower)
-        if ec_match:
-            digits = ec_match.group(1)
-            if len(digits) == 3 and int(digits) >= 300:
-                lower = f"ec0{digits}"
-            elif len(digits) == 2:
-                lower = f"ec0{digits}"
-            else:
-                lower = f"ec{digits}"
-
-        return lower
+        return normalize_sample_token(token)
 
     def _is_likely_sample_name(self, text: str) -> bool:
         """Identify whether a method-file entry looks like a real sample."""
@@ -1855,10 +1823,11 @@ class DataOrganizer(BaseProcessor):
 
         Returns:
             SampleInfo DataFrame with columns:
-            - Sample_Name: Full sample name from Word document
+            - Sample_Name: RawIntensity column name used as downstream join key
             - Sample_Type: Detected sample type
             - Injection_Order: Re-numbered order (starting from 1)
             - Injection_Volume: Volume from method file
+            - Method_Sample_Name: Matched sample name from Word document
         """
         # Determine number of fixed columns
         fixed_cols, num_fixed = detect_fixed_columns(df)
@@ -1970,13 +1939,18 @@ class DataOrganizer(BaseProcessor):
 
             # Get sample type from the Sample_Type row
             sample_type = sample_type_row.get(col, "sample")
+            identity = build_sample_info_identity(
+                col,
+                matched_info.file_name if matched_info else None,
+            )
 
             sample_info_data.append(
                 {
-                    "Sample_Name": matched_info.file_name if matched_info else col,
+                    "Sample_Name": identity.sample_name,
                     "Sample_Type": sample_type,
                     "Injection_Order": matched_info.injection_order if matched_info else 999,
                     "Injection_Volume": matched_info.injection_volume if matched_info else 0,
+                    "Method_Sample_Name": identity.method_sample_name,
                     "_col_name": col,  # Internal: for column reordering
                 }
             )
@@ -1988,6 +1962,7 @@ class DataOrganizer(BaseProcessor):
         # Ensure SampleInfo headers exist and follow expected order
         display_cols = [
             "Sample_Name",
+            "Method_Sample_Name",
             "Sample_Type",
             "Injection_Order",
             "Batch",
