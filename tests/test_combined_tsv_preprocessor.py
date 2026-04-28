@@ -110,3 +110,27 @@ def test_false_positive_fix_treats_zero_as_missing_and_clears_zero_outputs() -> 
 
     sample_data = result.iloc[:, 2:]
     assert not sample_data.eq(0).any().any()
+
+
+def test_process_combined_and_fix_returns_failed_result_for_unexpected_fix_error(
+    monkeypatch,
+) -> None:
+    preprocessor = CombinedTsvPreprocessor()
+
+    def process_combined(*_args, **_kwargs) -> ProcessingResult:
+        return ProcessingResult(
+            success=True,
+            data=pd.DataFrame({"Mz": [1.0], "RT": [2.0]}),
+        )
+
+    def false_positive_fix(_df: pd.DataFrame) -> pd.DataFrame:
+        raise RuntimeError("unexpected pandas failure")
+
+    monkeypatch.setattr(preprocessor, "process_combined", process_combined)
+    monkeypatch.setattr(preprocessor, "false_positive_fix", false_positive_fix)
+
+    result = preprocessor.process_combined_and_fix(pd.DataFrame())
+
+    assert not result.success
+    assert result.errors == ["unexpected pandas failure"]
+    assert result.message == "False-positive fix failed: unexpected pandas failure"

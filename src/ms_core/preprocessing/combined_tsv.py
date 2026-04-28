@@ -205,7 +205,7 @@ class CombinedTsvPreprocessor:
                 area_vals.loc[replace_mask] * self.MZMINE_AREA_UNIT_FACTOR
             )
             merged = merged.mask(merged.eq(0))
-            result.isetitem(fh_pos, merged.astype("float64"))
+            result = self._assign_column_by_position(result, fh_pos, merged.astype("float64"))
 
         result.iloc[:, 0] = result.iloc[:, mzmine_mz_idx].to_numpy()
         result.iloc[:, 1] = result.iloc[:, mzmine_rt_idx].to_numpy()
@@ -213,7 +213,11 @@ class CombinedTsvPreprocessor:
         final = result.iloc[:, :mzmine_id_idx].copy()
         for fh_pos in range(2, len(final.columns)):
             sample_vals = pd.to_numeric(final.iloc[:, fh_pos], errors="coerce")
-            final.isetitem(fh_pos, sample_vals.mask(sample_vals.eq(0)).astype("float64"))
+            final = self._assign_column_by_position(
+                final,
+                fh_pos,
+                sample_vals.mask(sample_vals.eq(0)).astype("float64"),
+            )
         return final
 
     def process_combined_and_fix(
@@ -237,7 +241,7 @@ class CombinedTsvPreprocessor:
 
         try:
             final_df = self.false_positive_fix(combined_result.data)
-        except (ValueError, TypeError, IndexError, KeyError) as exc:
+        except Exception as exc:
             return ProcessingResult(
                 success=False,
                 errors=[str(exc)],
@@ -276,3 +280,15 @@ class CombinedTsvPreprocessor:
             return float(str(value).strip()) == 0.0
         except ValueError:
             return False
+
+    @staticmethod
+    def _assign_column_by_position(
+        df: pd.DataFrame,
+        position: int,
+        values: pd.Series,
+    ) -> pd.DataFrame:
+        """Assign one positional column while preserving duplicate column labels."""
+        columns = list(df.columns)
+        frame_values = df.to_numpy(dtype=object, copy=True)
+        frame_values[:, position] = values.to_numpy()
+        return pd.DataFrame(frame_values, columns=columns)
