@@ -52,6 +52,24 @@ def test_layout_helpers_extract_sample_type_row_with_normalized_values() -> None
     assert extraction.data.iloc[0, 0] == 100.0
 
 
+def test_layout_helpers_extract_sample_type_row_from_pre_merged_mz_rt_layout() -> None:
+    df = pd.DataFrame(
+        [
+            ["Sample Type", "control", "QC"],
+            ["100.1234/1.23", 10, 20],
+        ],
+        columns=["Mz/RT", "TumorBC1_DNA", "pooled_QC1"],
+    )
+
+    extraction = extract_sample_type_row_from_input(df)
+
+    assert extraction.sample_types == {
+        "TumorBC1_DNA": "Control",
+        "pooled_QC1": "QC",
+    }
+    assert extraction.stats["input_sample_type_count"] == 2
+
+
 def test_layout_helpers_move_leading_metadata_after_sample_columns() -> None:
     df = pd.DataFrame(
         {

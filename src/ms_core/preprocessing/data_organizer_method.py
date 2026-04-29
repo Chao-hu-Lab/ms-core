@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from ms_core.preprocessing.data_organizer_layout import normalize_sample_type_value
 from ms_core.preprocessing.method_sequence import extract_docx_tables_fallback
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ def parse_method_file(file_path: str | Path) -> dict[str, str]:
                     continue
                 sample_id = extract_sample_id(cell_text)
                 if sample_id:
-                    mapping[sample_id] = sample_type
+                    mapping[sample_id] = normalize_sample_type_value(sample_type) or sample_type
 
     return mapping
 

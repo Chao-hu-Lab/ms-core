@@ -109,12 +109,15 @@ def extract_sample_type_row_from_input(df: pd.DataFrame) -> SampleTypeRowExtract
         return SampleTypeRowExtraction(df, {}, stats)
 
     provided_types: dict[str, str] = {}
-    for col in df.columns[2:]:
+    sample_start_idx = 1 if is_pre_merged_mz_rt_header(str(df.columns[0])) else 2
+    for col in df.columns[sample_start_idx:]:
         col_str = str(col)
         if is_non_sample_column(col_str):
             continue
         normalized = normalize_sample_type_value(df.iloc[0][col])
         if normalized is None:
+            continue
+        if normalized == "na":
             continue
         provided_types[col_str] = normalized
 
