@@ -7,7 +7,11 @@ from pathlib import Path
 ALGORITHM_TEST_FILES = frozenset(
     {
         "test_combined_tsv_preprocessor.py",
+        "test_data_organizer_facade_contract.py",
         "test_data_organizer_false_positive_fix.py",
+        "test_data_organizer_layout.py",
+        "test_data_organizer_method.py",
+        "test_data_organizer_step1.py",
         "test_degeneracy_annotation.py",
         "test_detection_ratios.py",
         "test_duplicate_intensity_merge.py",

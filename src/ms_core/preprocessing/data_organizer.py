@@ -21,17 +21,41 @@ Output format (SampleInfo):
     Sample_Name | Sample_Type | Injection_Order | Injection_Volume | Method_Sample_Name
 """
 
-import logging
-import re
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Union
 import pandas as pd
-import numpy as np
-
-logger = logging.getLogger(__name__)
 
 from ms_core.preprocessing.base import BaseProcessor, ProcessingResult
 from ms_core.preprocessing.combined_tsv import CombinedTsvPreprocessor
+from ms_core.preprocessing.data_organizer_layout import (
+    expand_pre_merged_mz_rt,
+    extract_sample_type_row_from_input,
+    is_pre_merged_mz_rt_header,
+    move_leading_metadata_to_end,
+    normalize_sample_type_value,
+)
+from ms_core.preprocessing.data_organizer_matrix import (
+    auto_detect_sample_types as auto_detect_sample_types_from_columns,
+    detect_fixed_columns_for_statistics,
+    detect_sample_type,
+    finalize_structure,
+    find_matching_sample_column_position,
+    insert_sample_type_row,
+    merge_mz_rt,
+    reorder_columns_by_injection,
+    reorder_columns_statistics_mode,
+    simplify_headers,
+    validate_statistics_input,
+)
+from ms_core.preprocessing.data_organizer_method import (
+    extract_sample_id,
+    parse_method_file,
+)
+from ms_core.preprocessing.data_organizer_step1 import (
+    assemble_step1_output,
+    prepare_step1_input,
+    simplify_input_sample_type_overrides,
+)
 from ms_core.preprocessing.method_sequence import (
     InjectionInfo,
     extract_docx_tables_fallback,
@@ -48,7 +72,6 @@ from ms_core.preprocessing.sample_identity import (
 )
 from ms_core.preprocessing.sample_info_builder import SampleInfoBuilder, is_non_sample_column
 from ms_core.preprocessing.settings import DataOrganizerConfig
-from ms_core.utils.validators import detect_fixed_columns
 
 
 class DataOrganizer(BaseProcessor):
@@ -90,8 +113,7 @@ class DataOrganizer(BaseProcessor):
 
         Accepts variants such as "Mz/RT", "mz/rt", "MZ/RT", "m/z/rt".
         """
-        normalized = re.sub(r"[\s_]", "", col_name.lower())
-        return normalized in {"mz/rt", "m/z/rt", "mzrt"}
+        return is_pre_merged_mz_rt_header(col_name)
 
     def _expand_pre_merged_mz_rt(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, bool]:
         """Expand an already-combined Mz/RT column into separate numeric Mz and RT columns.
@@ -105,38 +127,7 @@ class DataOrganizer(BaseProcessor):
             Tuple of (resulting_df, was_expanded).  *was_expanded* is False when the
             first column was not a pre-merged Mz/RT column or no values could be parsed.
         """
-        if df.empty:
-            return df, False
-
-        first_col = str(df.columns[0]).strip().lower()
-        if not self._is_pre_merged_mz_rt_header(first_col):
-            return df, False
-
-        mz_values: list = []
-        rt_values: list = []
-        any_parsed = False
-
-        for val in df.iloc[:, 0]:
-            val_str = str(val).strip()
-            parts = val_str.split("/")
-            if len(parts) == 2:
-                try:
-                    mz_values.append(float(parts[0].strip()))
-                    rt_values.append(float(parts[1].strip()))
-                    any_parsed = True
-                    continue
-                except ValueError:
-                    pass
-            # Non-parseable row (e.g., NaN placeholder) — keep as-is
-            mz_values.append(np.nan)
-            rt_values.append(np.nan)
-
-        if not any_parsed:
-            return df, False
-
-        rest_df = df.iloc[:, 1:].reset_index(drop=True)
-        expanded = pd.DataFrame({"Mz": mz_values, "RT": rt_values})
-        return pd.concat([expanded, rest_df], axis=1), True
+        return expand_pre_merged_mz_rt(df)
 
     def _is_non_sample_column(self, column_name: str) -> bool:
         """Return True when a column is metadata and should not be treated as a sample."""
@@ -144,34 +135,7 @@ class DataOrganizer(BaseProcessor):
 
     def _normalize_sample_type_value(self, value: Any) -> Optional[str]:
         """Normalize sample type labels to toolkit's canonical values."""
-        if value is None or pd.isna(value):
-            return None
-        text = str(value).strip()
-        if not text:
-            return None
-
-        key = re.sub(r"[^a-z0-9]+", "", text.lower())
-        mapping = {
-            "qc": "QC",
-            "qualitycontrol": "QC",
-            "pooledqc": "QC",
-            "exposure": "Exposure",
-            "tumor": "Exposure",
-            "tumour": "Exposure",
-            "cancer": "Exposure",
-            "case": "Exposure",
-            "normal": "Normal",
-            "control": "Control",
-            "benign": "Control",
-            "benignfat": "Control",
-            "sample": "sample",
-            "blank": "blank",
-            "std": "standard",
-            "standard": "standard",
-            "sdolek": "standard",
-            "na": "na",
-        }
-        return mapping.get(key, text)
+        return normalize_sample_type_value(value)
 
     def _extract_sample_type_row_from_input(
         self,
@@ -182,32 +146,8 @@ class DataOrganizer(BaseProcessor):
 
         Expected marker is in the first row / first column (e.g., "Sample Type").
         """
-        stats: Dict[str, Any] = {
-            "sample_types_from_input": False,
-            "input_sample_type_count": 0,
-        }
-        if df.empty:
-            return df, {}, stats
-
-        marker = str(df.iloc[0, 0]).strip().lower()
-        marker_compact = re.sub(r"[^a-z0-9]+", "", marker)
-        if marker_compact != "sampletype":
-            return df, {}, stats
-
-        provided_types: Dict[str, str] = {}
-        for col in df.columns[2:]:
-            col_str = str(col)
-            if self._is_non_sample_column(col_str):
-                continue
-            normalized = self._normalize_sample_type_value(df.iloc[0][col])
-            if normalized is None:
-                continue
-            provided_types[col_str] = normalized
-
-        cleaned_df = df.iloc[1:].reset_index(drop=True)
-        stats["sample_types_from_input"] = True
-        stats["input_sample_type_count"] = len(provided_types)
-        return cleaned_df, provided_types, stats
+        extraction = extract_sample_type_row_from_input(df)
+        return extraction.data, extraction.sample_types, extraction.stats
 
     def _extract_primary_sample_token(self, text: str) -> Optional[str]:
         """Extract a canonical sample token from free text."""
@@ -228,31 +168,7 @@ class DataOrganizer(BaseProcessor):
         validate_input and _merge_mz_rt find m/z and RT in the expected positions
         without requiring manual column reordering by the user.
         """
-        if df.empty or len(df.columns) < 3:
-            return df
-
-        def _looks_like_mz_or_rt(col_lower: str) -> bool:
-            return bool(
-                "m/z" in col_lower
-                or re.search(r"\bmz\b", col_lower)
-                or re.search(r"\bmass\b", col_lower)
-                or re.search(r"\brt\b", col_lower)
-                or "retention" in col_lower
-            )
-
-        leading_meta: list = []
-        for col in df.columns:
-            col_lower = str(col).strip().lower()
-            if _looks_like_mz_or_rt(col_lower):
-                break
-            if self._is_non_sample_column(str(col)):
-                leading_meta.append(col)
-            else:
-                break
-        if not leading_meta:
-            return df
-        rest = [c for c in df.columns if c not in leading_meta]
-        return df[rest + leading_meta]
+        return move_leading_metadata_to_end(df)
 
     def validate_input(self, df: pd.DataFrame) -> tuple:
         """
@@ -376,34 +292,20 @@ class DataOrganizer(BaseProcessor):
         self.update_progress(5, "Starting data organization...")
 
         try:
-            # Create a copy
-            result_df = df.copy()
-            stats = {
-                "original_rows": len(df),
-                "original_cols": len(df.columns),
-            }
-            result_df, input_sample_types, input_type_stats = (
-                self._extract_sample_type_row_from_input(result_df)
-            )
-            stats.update(input_type_stats)
-
-            # Expand pre-merged Mz/RT column into separate numeric Mz and RT columns
-            # so that _merge_mz_rt can re-format them to the standard precision.
-            result_df, _was_expanded = self._expand_pre_merged_mz_rt(result_df)
-
             # Step 1: Parse method file if provided
             self.update_progress(10, "Parsing method file...")
-            sample_mapping = {}
-            injection_info_list: List[InjectionInfo] = []
-
-            if method_file:
-                sample_mapping = self._parse_method_file(method_file)
-                injection_info_list = self._parse_injection_sequence(method_file)
-                stats["method_file_samples"] = len(sample_mapping)
-                stats["injection_sequence_count"] = len(injection_info_list)
-
-            if sample_type_mapping:
-                sample_mapping.update(sample_type_mapping)
+            prepared = prepare_step1_input(
+                df,
+                method_file=method_file,
+                sample_type_mapping=sample_type_mapping,
+                mode=mode_name,
+                parse_method_file=self._parse_method_file,
+                parse_injection_sequence=self._parse_injection_sequence,
+            )
+            result_df = prepared.data
+            stats = prepared.statistics
+            sample_mapping = prepared.sample_mapping
+            injection_info_list = prepared.injection_info_list
 
             if self._cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
@@ -422,19 +324,11 @@ class DataOrganizer(BaseProcessor):
             self.update_progress(50, "Simplifying column headers...")
             result_df, header_mapping = self._simplify_headers(result_df)
             stats["columns_simplified"] = len(header_mapping)
-            input_sample_types_simplified: Dict[str, str] = {}
-            if input_sample_types:
-                for raw_col, sample_type in input_sample_types.items():
-                    simplified = header_mapping.get(
-                        raw_col, self._extract_sample_name(str(raw_col))
-                    )
-                    normalized = self._normalize_sample_type_value(sample_type)
-                    if (
-                        simplified
-                        and normalized
-                        and simplified not in input_sample_types_simplified
-                    ):
-                        input_sample_types_simplified[simplified] = normalized
+            input_sample_types_simplified = simplify_input_sample_type_overrides(
+                prepared.input_sample_types,
+                header_mapping,
+                self._extract_sample_name,
+            )
 
             if self._cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
@@ -452,33 +346,22 @@ class DataOrganizer(BaseProcessor):
             if self._cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
 
-            # Step 5: Build SampleInfo DataFrame
-            self.update_progress(70, "Building SampleInfo...")
-            sample_info_df = self._build_sample_info(result_df, injection_info_list)
-            stats["sample_info_rows"] = len(sample_info_df)
-
-            if self._cancelled:
+            assembled = assemble_step1_output(
+                result_df,
+                injection_info_list=injection_info_list,
+                build_sample_info=self._build_sample_info,
+                reorder_columns_by_injection=self._reorder_columns_by_injection,
+                finalize_structure=self._finalize_structure,
+                update_progress=self.update_progress,
+                cancellation_requested=lambda: self._cancelled,
+            )
+            if assembled.cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
-
-            # Step 6: Reorder columns based on Injection_Order
-            self.update_progress(80, "Reordering columns by injection order...")
-            result_df = self._reorder_columns_by_injection(result_df, sample_info_df)
-
-            # Clean up SampleInfo: remove internal columns
-            if "_col_name" in sample_info_df.columns:
-                sample_info_df = sample_info_df.drop(columns=["_col_name"])
-
-            if self._cancelled:
-                return ProcessingResult(success=False, message="Processing cancelled")
-
-            # Step 7: Final cleanup
-            self.update_progress(90, "Finalizing...")
-            result_df = self._finalize_structure(result_df)
+            result_df = assembled.data
+            sample_info_df = assembled.sample_info
+            stats.update(assembled.statistics)
 
             self.update_progress(100, "Data organization complete")
-
-            stats["final_rows"] = len(result_df)
-            stats["final_cols"] = len(result_df.columns)
 
             return ProcessingResult(
                 success=True,
@@ -526,37 +409,20 @@ class DataOrganizer(BaseProcessor):
         self.update_progress(5, "Starting statistics mode...")
 
         try:
-            result_df = df.copy()
-            stats: Dict[str, Any] = {
-                "mode": "statistics",
-                "original_rows": len(df),
-                "original_cols": len(df.columns),
-            }
-            result_df, input_sample_types, input_type_stats = (
-                self._extract_sample_type_row_from_input(result_df)
-            )
-            stats.update(input_type_stats)
-
-            # Expand pre-merged Mz/RT column into separate numeric Mz and RT columns
-            # before capturing original values for later restoration in statistics output.
-            result_df, _was_expanded = self._expand_pre_merged_mz_rt(result_df)
-
-            original_mz_col = str(result_df.columns[0])
-            original_rt_col = str(result_df.columns[1])
-            original_mz_values = result_df.iloc[:, 0].tolist()
-            original_rt_values = result_df.iloc[:, 1].tolist()
-
             # Step 1: Parse method file if provided
             self.update_progress(10, "Parsing method file...")
-            sample_mapping: Dict[str, str] = {}
-            injection_info_list: List[InjectionInfo] = []
-            if method_file:
-                sample_mapping = self._parse_method_file(method_file)
-                injection_info_list = self._parse_injection_sequence(method_file)
-            if sample_type_mapping:
-                sample_mapping.update(sample_type_mapping)
-            stats["method_file_samples"] = len(sample_mapping)
-            stats["injection_sequence_count"] = len(injection_info_list)
+            prepared = prepare_step1_input(
+                df,
+                method_file=method_file,
+                sample_type_mapping=sample_type_mapping,
+                mode="statistics",
+                parse_method_file=self._parse_method_file,
+                parse_injection_sequence=self._parse_injection_sequence,
+            )
+            result_df = prepared.data
+            stats = prepared.statistics
+            sample_mapping = prepared.sample_mapping
+            injection_info_list = prepared.injection_info_list
 
             if self._cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
@@ -580,19 +446,11 @@ class DataOrganizer(BaseProcessor):
             self.update_progress(50, "Simplifying column headers...")
             result_df, header_mapping = self._simplify_headers(result_df)
             stats["columns_simplified"] = len(header_mapping)
-            input_sample_types_simplified: Dict[str, str] = {}
-            if input_sample_types:
-                for raw_col, sample_type in input_sample_types.items():
-                    simplified = header_mapping.get(
-                        raw_col, self._extract_sample_name(str(raw_col))
-                    )
-                    normalized = self._normalize_sample_type_value(sample_type)
-                    if (
-                        simplified
-                        and normalized
-                        and simplified not in input_sample_types_simplified
-                    ):
-                        input_sample_types_simplified[simplified] = normalized
+            input_sample_types_simplified = simplify_input_sample_type_overrides(
+                prepared.input_sample_types,
+                header_mapping,
+                self._extract_sample_name,
+            )
 
             if self._cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
@@ -610,46 +468,23 @@ class DataOrganizer(BaseProcessor):
             if self._cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
 
-            # Step 5: Build SampleInfo DataFrame
-            self.update_progress(70, "Building SampleInfo...")
-            sample_info_df = self._build_sample_info(result_df, injection_info_list)
-            stats["sample_info_rows"] = len(sample_info_df)
-
-            if self._cancelled:
+            assembled = assemble_step1_output(
+                result_df,
+                injection_info_list=injection_info_list,
+                build_sample_info=self._build_sample_info,
+                reorder_columns_by_injection=self._reorder_columns_by_injection,
+                finalize_structure=self._finalize_structure,
+                statistics_restore=prepared.statistics_restore,
+                update_progress=self.update_progress,
+                cancellation_requested=lambda: self._cancelled,
+            )
+            if assembled.cancelled:
                 return ProcessingResult(success=False, message="Processing cancelled")
-
-            # Step 6: Reorder columns based on Injection_Order
-            self.update_progress(80, "Reordering columns by injection order...")
-            result_df = self._reorder_columns_by_injection(result_df, sample_info_df)
-
-            # Clean up SampleInfo: remove internal columns
-            if "_col_name" in sample_info_df.columns:
-                sample_info_df = sample_info_df.drop(columns=["_col_name"])
-
-            if self._cancelled:
-                return ProcessingResult(success=False, message="Processing cancelled")
-
-            # Step 7: Final cleanup
-            self.update_progress(90, "Finalizing...")
-            result_df = self._finalize_structure(result_df)
-
-            # Step 8: Restore separate Mz/RT columns in final output
-            self.update_progress(95, "Restoring separate Mz and RT columns...")
-            mz_column_values = ["Sample_Type"] + original_mz_values
-            rt_column_values = ["na"] + original_rt_values
-            result_df.insert(0, original_mz_col, mz_column_values)
-            result_df.insert(1, original_rt_col, rt_column_values)
-
-            # Remove internal merged Mz/RT column while preserving all other columns.
-            mzrt_positions = [idx for idx, col in enumerate(result_df.columns) if col == "Mz/RT"]
-            if mzrt_positions:
-                drop_idx = mzrt_positions[0]
-                keep_idx = [idx for idx in range(len(result_df.columns)) if idx != drop_idx]
-                result_df = result_df.iloc[:, keep_idx]
+            result_df = assembled.data
+            sample_info_df = assembled.sample_info
+            stats.update(assembled.statistics)
 
             self.update_progress(100, "Statistics mode complete")
-            stats["final_rows"] = len(result_df)
-            stats["final_cols"] = len(result_df.columns)
 
             return ProcessingResult(
                 success=True,
@@ -721,41 +556,11 @@ class DataOrganizer(BaseProcessor):
 
     def _validate_statistics_input(self, df: pd.DataFrame) -> Tuple[bool, str]:
         """Validate input data for statistics mode."""
-        if df is None or df.empty:
-            return False, "Input data is empty"
-        if len(df.columns) < 3:
-            return False, "Input data must have at least 3 columns"
-
-        _, num_fixed = self._detect_fixed_columns_for_statistics(df)
-        if num_fixed >= 1:
-            return True, ""
-
-        first_col = str(df.columns[0]).lower()
-        second_col = str(df.columns[1]).lower()
-        if ("mz" in first_col or "m/z" in first_col or "mass" in first_col) and (
-            "rt" in second_col or "time" in second_col or "retention" in second_col
-        ):
-            return True, ""
-
-        return False, (
-            "Statistics mode expects either normalized fixed columns "
-            "(Mz/RT) or raw Mz/RT leading columns"
-        )
+        return validate_statistics_input(df)
 
     def _detect_fixed_columns_for_statistics(self, df: pd.DataFrame) -> Tuple[List[str], int]:
         """Detect fixed columns for statistics-mode sorting."""
-        fixed_cols, num_fixed = detect_fixed_columns(df)
-        if num_fixed == 0:
-            return fixed_cols, num_fixed
-
-        # Accept legacy tolerance label as fixed column in statistics mode.
-        if num_fixed < len(df.columns):
-            next_col = str(df.columns[num_fixed]).lower()
-            if "tolerance" in next_col:
-                fixed_cols = fixed_cols + [df.columns[num_fixed]]
-                num_fixed += 1
-
-        return fixed_cols, num_fixed
+        return detect_fixed_columns_for_statistics(df)
 
     def _reorder_columns_statistics_mode(
         self,
@@ -763,66 +568,7 @@ class DataOrganizer(BaseProcessor):
         injection_info_list: List[InjectionInfo],
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Reorder sample columns for statistics mode without creating SampleInfo."""
-        stats: Dict[str, Any] = {
-            "columns_reordered": 0,
-            "columns_unmatched": 0,
-        }
-        if df.empty:
-            return df, stats
-
-        fixed_cols, num_fixed = self._detect_fixed_columns_for_statistics(df)
-        fixed_positions = list(range(num_fixed))
-        sample_positions = [
-            idx
-            for idx in range(num_fixed, len(df.columns))
-            if not self._is_non_sample_column(str(df.columns[idx]))
-        ]
-        metadata_positions = [
-            idx
-            for idx in range(num_fixed, len(df.columns))
-            if self._is_non_sample_column(str(df.columns[idx]))
-        ]
-
-        if not sample_positions:
-            return df, stats
-
-        filtered_injection_list: List[InjectionInfo] = []
-        for info in injection_info_list:
-            if self._is_likely_sample_name(info.file_name):
-                filtered_injection_list.append(info)
-
-        if not filtered_injection_list:
-            stats["columns_unmatched"] = len(sample_positions)
-            return df, stats
-
-        sorted_injection_list = sorted(filtered_injection_list, key=lambda x: x.injection_order)
-
-        available_positions = list(sample_positions)
-        ordered_positions: List[int] = []
-
-        for info in sorted_injection_list:
-            match_pos = self._find_matching_sample_column_position(
-                df,
-                available_positions,
-                info.file_name,
-            )
-            if match_pos is None:
-                continue
-            ordered_positions.append(match_pos)
-            available_positions.remove(match_pos)
-
-        ordered_positions.extend(available_positions)
-        stats["columns_reordered"] = len(ordered_positions) - len(available_positions)
-        stats["columns_unmatched"] = len(available_positions)
-
-        new_positions = fixed_positions + ordered_positions + metadata_positions
-        reordered_df = df.iloc[:, new_positions]
-        reordered_df.columns = (
-            fixed_cols
-            + [df.columns[i] for i in ordered_positions]
-            + [df.columns[i] for i in metadata_positions]
-        )
-        return reordered_df, stats
+        return reorder_columns_statistics_mode(df, injection_info_list)
 
     def _find_matching_sample_column_position(
         self,
@@ -831,80 +577,7 @@ class DataOrganizer(BaseProcessor):
         file_name: str,
     ) -> Optional[int]:
         """Find a matching sample column index for a method-file sample name."""
-        file_lower = file_name.lower().replace("\n", " ")
-        file_simplified = self._simplify_word_sample_name(file_name).lower()
-        file_keys = {
-            self._normalize_sample_key(file_name),
-            self._normalize_sample_key(file_simplified),
-            self._normalize_sample_key(self._extract_primary_sample_token(file_name) or ""),
-        }
-        file_keys = {k for k in file_keys if k}
-
-        def detect_variant(text: str) -> str:
-            text = text.lower().replace("\n", " ").replace("*", " ")
-            if "dna" in text and "rna" in text and "+" in text:
-                return "dna+rna"
-            if "dnaandrna" in text.replace(" ", ""):
-                return "dna+rna"
-            if "_rna" in text or " rna" in text or text.endswith("rna"):
-                return "rna"
-            return "dna"
-
-        def sanitize(text: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "", text.lower())
-
-        for pos in candidate_positions:
-            col_raw = str(df.columns[pos])
-            col_lower = col_raw.lower()
-            col_key = self._extract_sample_name(col_raw).lower()
-            col_keys = {
-                self._normalize_sample_key(col_raw),
-                self._normalize_sample_key(col_key),
-                self._normalize_sample_key(self._extract_primary_sample_token(col_raw) or ""),
-            }
-            col_keys = {k for k in col_keys if k}
-
-            if file_keys and col_keys and file_keys.intersection(col_keys):
-                return pos
-
-            bc_match_col = re.search(r"(tumor|normal|benign|benignfat)?(bc\d+)", col_key)
-            bc_match_file = re.search(
-                r"(tumor|normal|benign)\s*(tissue)?\s*(fat\s*)?(bc\d+)", file_lower
-            )
-            if bc_match_col and bc_match_file:
-                col_prefix = bc_match_col.group(1) or ""
-                if "benign" in col_prefix:
-                    col_prefix = "benign"
-                col_id = bc_match_col.group(2)
-                col_variant = detect_variant(col_key)
-
-                file_prefix = bc_match_file.group(1) or ""
-                file_id = bc_match_file.group(4)
-                file_variant = detect_variant(file_lower)
-                if col_id == file_id and col_prefix == file_prefix and col_variant == file_variant:
-                    return pos
-
-            qc_match_col = re.search(r"(pooled_?)?qc_?(\d+)", col_key)
-            qc_match_file = re.search(r"(pooled_?)?qc_?(\d+)", file_lower)
-            if qc_match_col and qc_match_file and qc_match_col.group(2) == qc_match_file.group(2):
-                return pos
-
-            if file_simplified and (file_simplified in col_key or col_key in file_simplified):
-                return pos
-
-            col_token = sanitize(col_key)
-            file_token = sanitize(file_simplified)
-            if (
-                col_token
-                and file_token
-                and (col_token == file_token or col_token in file_token or file_token in col_token)
-            ):
-                return pos
-
-            if file_simplified and (file_simplified in col_lower or col_lower in file_simplified):
-                return pos
-
-        return None
+        return find_matching_sample_column_position(df, candidate_positions, file_name)
 
     def _merge_mz_rt(
         self,
@@ -918,48 +591,12 @@ class DataOrganizer(BaseProcessor):
 
         Format: "mz/RT" (e.g., "252.1098/18.45")
         """
-        stats = {"mz_rt_merged": 0, "invalid_values": 0}
-
-        # Get Mz and RT columns (first two columns)
-        mz_col = df.columns[0]
-        rt_col = df.columns[1]
-
-        # Vectorized merge for performance
-        mz_series = pd.to_numeric(df.iloc[:, 0], errors="coerce")
-        rt_series = pd.to_numeric(df.iloc[:, 1], errors="coerce")
-        valid_mask = mz_series.notna() & rt_series.notna()
-
-        mz_np = mz_series.to_numpy()
-        rt_np = rt_series.to_numpy()
-        # Use pandas string ops to stay NumPy-version-agnostic (np.char.add/mod
-        # dropped object-dtype support in NumPy 2.x).
-        fmt_mz = f"%.{mz_decimals}f"
-        fmt_rt = f"%.{rt_decimals}f"
-        mz_str_list = [fmt_mz % v if not np.isnan(v) else "nan" for v in mz_np]
-        rt_str_list = [fmt_rt % v if not np.isnan(v) else "nan" for v in rt_np]
-        merged_list = [f"{m}/{r}" for m, r in zip(mz_str_list, rt_str_list)]
-
-        # Fallback to original strings for invalid rows
-        orig_mz = df.iloc[:, 0].astype(str).tolist()
-        orig_rt = df.iloc[:, 1].astype(str).tolist()
-        fallback_list = [f"{m}/{r}" for m, r in zip(orig_mz, orig_rt)]
-        valid_arr = valid_mask.to_numpy()
-        mz_rt_values = [
-            merged_list[i] if valid_arr[i] else fallback_list[i] for i in range(len(valid_arr))
-        ]
-
-        stats["mz_rt_merged"] = int(valid_mask.sum())
-        stats["invalid_values"] = int(len(df) - valid_mask.sum())
-
-        # Build new frame in one concat to avoid highly-fragmented DataFrame writes.
-        front_cols = {"Mz/RT": mz_rt_values}
-        if include_tolerance_col:
-            front_cols["m/z Tolerance( ppm)/RT Tolerance"] = "na"
-        leading_df = pd.DataFrame(front_cols)
-        trailing_df = df.iloc[:, 2:].reset_index(drop=True)
-        new_df = pd.concat([leading_df, trailing_df], axis=1)
-
-        return new_df, stats
+        return merge_mz_rt(
+            df,
+            mz_decimals=mz_decimals,
+            rt_decimals=rt_decimals,
+            include_tolerance_col=include_tolerance_col,
+        )
 
     def _simplify_headers(
         self,
@@ -972,27 +609,7 @@ class DataOrganizer(BaseProcessor):
             "Intensity of C:\\...\\program2_program1_TumorBC2257_DNA.tsv" -> "TumorBC2257_DNA"
             "Intensity of C:\\...\\Breast_Cancer_Tissue_pooled_QC1.tsv" -> "pooled_QC1"
         """
-        header_mapping = {}  # old_name -> new_name
-
-        # Fixed column names that should not be simplified
-        fixed_cols = ["Mz/RT", "FeatureID", "m/z Tolerance( ppm)/RT Tolerance"]
-
-        new_columns = []
-        for col in df.columns:
-            col_str = str(col)
-
-            # Skip fixed columns
-            if col in fixed_cols:
-                new_columns.append(col)
-                continue
-
-            # Extract sample name from path
-            new_name = self._extract_sample_name(col_str)
-            header_mapping[col_str] = new_name
-            new_columns.append(new_name)
-
-        df.columns = new_columns
-        return df, header_mapping
+        return simplify_headers(df)
 
     def _extract_sample_name(self, header: str) -> str:
         """
@@ -1019,53 +636,13 @@ class DataOrganizer(BaseProcessor):
         Auto-detects sample types based on column names, unless user-provided
         sample types are available from the input file.
         """
-        stats = {"types_detected": {}, "types_from_input": 0}
-
-        # Determine number of fixed columns (Mz/RT only, or Mz/RT + Tolerance)
-        fixed_cols, num_fixed = detect_fixed_columns(df)
-
-        # Detect sample types
-        sample_types = ["Sample_Type"] + ["na"] * (num_fixed - 1)  # Fixed columns
-        override_exact: Dict[str, str] = {}
-        override_by_key: Dict[str, str] = {}
-        if sample_type_overrides:
-            for col_name, sample_type in sample_type_overrides.items():
-                normalized = self._normalize_sample_type_value(sample_type)
-                if normalized is None:
-                    continue
-                exact_key = str(col_name)
-                override_exact[exact_key] = normalized
-                normalized_col_key = self._normalize_sample_key(exact_key)
-                if normalized_col_key and normalized_col_key not in override_by_key:
-                    override_by_key[normalized_col_key] = normalized
-
-        for col in df.columns[num_fixed:]:
-            if self._is_non_sample_column(str(col)):
-                sample_types.append("na")
-                continue
-            sample_type = override_exact.get(str(col))
-            if sample_type is None:
-                col_key = self._normalize_sample_key(str(col))
-                if col_key:
-                    sample_type = override_by_key.get(col_key)
-            if sample_type is None:
-                sample_type = self._detect_sample_type(col, sample_mapping)
-            else:
-                stats["types_from_input"] += 1
-            sample_types.append(sample_type)
-
-            # Track statistics
-            if sample_type not in stats["types_detected"]:
-                stats["types_detected"][sample_type] = 0
-            stats["types_detected"][sample_type] += 1
-
-        # Create sample type row as DataFrame
-        sample_type_row = pd.DataFrame([sample_types], columns=df.columns)
-
-        # Concatenate: sample_type_row on top of data
-        result_df = pd.concat([sample_type_row, df], ignore_index=True)
-
-        return result_df, stats
+        _ = header_mapping
+        return insert_sample_type_row(
+            df,
+            sample_mapping=sample_mapping,
+            sample_type_patterns=self.SAMPLE_TYPE_PATTERNS,
+            sample_type_overrides=sample_type_overrides,
+        )
 
     def _detect_sample_type(
         self,
@@ -1087,22 +664,7 @@ class DataOrganizer(BaseProcessor):
         Returns:
             Detected sample type
         """
-        col_lower = column_name.lower()
-
-        # Priority 1: Direct pattern matching from column name
-        # This ensures "TumorBC2257_DNA" is detected as tumor, not normal
-        for sample_type, patterns in self.SAMPLE_TYPE_PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, col_lower, re.IGNORECASE):
-                    return sample_type
-
-        # Priority 2: Check pre-defined mapping (only if direct detection fails)
-        for pattern, sample_type in sample_mapping.items():
-            if pattern.lower() in col_lower:
-                return sample_type
-
-        # Default to "sample" if no pattern matches
-        return "sample"
+        return detect_sample_type(column_name, sample_mapping, self.SAMPLE_TYPE_PATTERNS)
 
     def _finalize_structure(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1110,25 +672,7 @@ class DataOrganizer(BaseProcessor):
 
         Ensures proper data types and formatting.
         """
-        # Determine number of fixed columns
-        fixed_cols, num_fixed = detect_fixed_columns(df)
-
-        # First row is now Sample_Type — data rows start from index 1.
-        # Vectorized numeric conversion for all sample columns at once.
-        if len(df) > 1 and num_fixed < len(df.columns):
-            # Use positional indexing to support duplicate sample column names.
-            # Label-based assignment can fail when column labels are not unique.
-            sample_col_positions = list(range(num_fixed, len(df.columns)))
-            data_block = df.iloc[1:, sample_col_positions]
-            converted = data_block.apply(pd.to_numeric, errors="coerce")
-            conv_values = converted.to_numpy()
-            # Rebuild each column as a Python list so pandas 3.x
-            # StringDtype columns are replaced with object dtype.
-            for j, col_pos in enumerate(sample_col_positions):
-                col_name = df.columns[col_pos]
-                df[col_name] = [df.iat[0, col_pos]] + conv_values[:, j].tolist()
-
-        return df
+        return finalize_structure(df)
 
     def _extract_docx_tables_fallback(self, file_path: Union[str, Path]) -> List[List[List[str]]]:
         """Compatibility wrapper for method sequence DOCX fallback parsing."""
@@ -1194,79 +738,7 @@ class DataOrganizer(BaseProcessor):
         Returns:
             DataFrame with columns reordered by Injection_Order
         """
-        if sample_info_df.empty:
-            return df
-
-        # Determine fixed columns
-        fixed_cols, num_fixed = detect_fixed_columns(df)
-
-        # Split trailing columns into sample columns and metadata-only columns.
-        trailing_cols = list(df.columns[num_fixed:])
-        sample_cols = [col for col in trailing_cols if not self._is_non_sample_column(str(col))]
-        metadata_cols = [col for col in trailing_cols if self._is_non_sample_column(str(col))]
-
-        # Use _col_name from SampleInfo if available (direct mapping)
-        if "_col_name" in sample_info_df.columns:
-            # Sort by Injection_Order and get column names in order
-            sorted_info = sample_info_df.sort_values("Injection_Order")
-            ordered_sample_cols = sorted_info["_col_name"].tolist()
-
-            # Filter to only include columns that exist in df
-            ordered_sample_cols = [c for c in ordered_sample_cols if c in sample_cols]
-
-            # Add any remaining columns that weren't in SampleInfo
-            for col in sample_cols:
-                if col not in ordered_sample_cols:
-                    ordered_sample_cols.append(col)
-        else:
-            # Fallback to matching by sample name
-            ordered_sample_cols = []
-            sorted_info = sample_info_df.sort_values("Injection_Order")
-
-            for _, row in sorted_info.iterrows():
-                sample_name = row["Sample_Name"]
-
-                # Find matching column
-                for col in sample_cols:
-                    col_lower = col.lower()
-                    sample_lower = sample_name.lower()
-
-                    matched = False
-
-                    # BC ID match with type
-                    bc_match_col = re.search(r"(tumor|normal|benign|benignfat)?(bc\d+)", col_lower)
-                    bc_match_sample = re.search(
-                        r"(tumor|normal|benign)?\s*tissue\s*(fat\s*)?(bc\d+)", sample_lower
-                    )
-                    if bc_match_col and bc_match_sample:
-                        col_type = bc_match_col.group(1) or ""
-                        if "benign" in col_type:
-                            col_type = "benign"
-                        sample_type = bc_match_sample.group(1) or ""
-                        col_id = bc_match_col.group(2)
-                        sample_id = bc_match_sample.group(3)
-                        if col_id == sample_id and col_type == sample_type:
-                            matched = True
-
-                    # QC match
-                    qc_match_col = re.search(r"(pooled_?)?qc_?(\d+)", col_lower)
-                    qc_match_sample = re.search(r"(pooled_?)?qc_?(\d+)", sample_lower)
-                    if qc_match_col and qc_match_sample:
-                        if qc_match_col.group(2) == qc_match_sample.group(2):
-                            matched = True
-
-                    if matched and col not in ordered_sample_cols:
-                        ordered_sample_cols.append(col)
-                        break
-
-            # Add any remaining columns that weren't matched
-            for col in sample_cols:
-                if col not in ordered_sample_cols:
-                    ordered_sample_cols.append(col)
-
-        # Rebuild DataFrame with new column order
-        new_column_order = fixed_cols + ordered_sample_cols + metadata_cols
-        return df[new_column_order]
+        return reorder_columns_by_injection(df, sample_info_df)
 
     def _parse_method_file(self, file_path: Union[str, Path]) -> Dict[str, str]:
         """
@@ -1278,76 +750,7 @@ class DataOrganizer(BaseProcessor):
         Returns:
             Dictionary mapping sample names to sample types
         """
-        mapping = {}
-        file_path = Path(file_path)
-
-        if not file_path.exists():
-            return mapping
-
-        if file_path.suffix.lower() not in [".docx", ".doc"]:
-            return mapping
-
-        tables: List[List[List[str]]] = []
-        try:
-            from docx import Document
-
-            doc = Document(file_path)
-            for table in doc.tables:
-                table_rows: List[List[str]] = []
-                for row in table.rows:
-                    table_rows.append([cell.text.strip() for cell in row.cells])
-                if table_rows:
-                    tables.append(table_rows)
-        except ImportError:
-            logger.warning("python-docx not installed; using fallback DOCX parser for method file")
-            tables = self._extract_docx_tables_fallback(file_path)
-        except Exception as exc:
-            logger.warning(
-                "python-docx parse failed for %s (%s); using fallback parser", file_path, exc
-            )
-            tables = self._extract_docx_tables_fallback(file_path)
-
-        # Parse tables for sample information
-        for table_rows in tables:
-            for row in table_rows:
-                cells = [str(cell).strip() for cell in row]
-
-                # Look for patterns like "Tumor tissue BC2257_DNA" or "Normal tissue BC2257_DNA"
-                for cell_text in cells:
-                    cell_lower = cell_text.lower()
-
-                    # Detect sample type from cell content
-                    if "tumor" in cell_lower or "cancer" in cell_lower:
-                        sample_id = self._extract_sample_id(cell_text)
-                        if sample_id:
-                            mapping[sample_id] = "tumor"
-
-                    elif "normal" in cell_lower:
-                        sample_id = self._extract_sample_id(cell_text)
-                        if sample_id:
-                            mapping[sample_id] = "normal"
-
-                    elif "benign" in cell_lower:
-                        sample_id = self._extract_sample_id(cell_text)
-                        if sample_id:
-                            mapping[sample_id] = "benign"
-
-                    elif "qc" in cell_lower or "pool" in cell_lower:
-                        sample_id = self._extract_sample_id(cell_text)
-                        if sample_id:
-                            mapping[sample_id] = "qc"
-
-                    elif "blank" in cell_lower:
-                        sample_id = self._extract_sample_id(cell_text)
-                        if sample_id:
-                            mapping[sample_id] = "blank"
-
-                    elif "std" in cell_lower:
-                        sample_id = self._extract_sample_id(cell_text)
-                        if sample_id:
-                            mapping[sample_id] = "standard"
-
-        return mapping
+        return parse_method_file(file_path)
 
     def _extract_sample_id(self, text: str) -> Optional[str]:
         """
@@ -1357,18 +760,7 @@ class DataOrganizer(BaseProcessor):
             "Tumor tissue BC2257_DNA" -> "BC2257_DNA"
             "Normal tissue BC2257_DNA" -> "BC2257_DNA"
         """
-        # Pattern to match sample IDs like BC2257_DNA
-        patterns = [
-            r"BC\d+_\w+",  # BC2257_DNA, BC2257_RNA
-            r"[A-Z]{2,}\d+",  # Generic ID pattern
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group()
-
-        return None
+        return extract_sample_id(text)
 
     def auto_detect_sample_types(
         self,
@@ -1385,13 +777,11 @@ class DataOrganizer(BaseProcessor):
         Returns:
             Dictionary mapping column names to detected sample types
         """
-        mapping = {}
-
-        for col in column_names:
-            sample_type = self._detect_sample_type(col, patterns or {})
-            mapping[col] = sample_type
-
-        return mapping
+        return auto_detect_sample_types_from_columns(
+            column_names,
+            self.SAMPLE_TYPE_PATTERNS,
+            patterns,
+        )
 
 
 def load_raw_data(
