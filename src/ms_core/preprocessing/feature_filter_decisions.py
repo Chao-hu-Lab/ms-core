@@ -47,6 +47,7 @@ class FeatureFilterDecisionTable:
     """Apply Step4 feature keep/delete gates without shaping output rows."""
 
     _SMALL_N_THRESHOLD: int = 10
+    _RATIO_RESCUE_MIN_DETECTION: float = 0.10
 
     def decide(
         self,
@@ -169,7 +170,7 @@ class FeatureFilterDecisionTable:
                     detection_min > 0, detection_max / detection_min, 0.0
                 )
             ratio_rescue_keep = (det_ratio >= thresholds.ratio_rescue) & (
-                detection_min > thresholds.low_det
+                detection_min >= self._RATIO_RESCUE_MIN_DETECTION
             )
         else:
             ratio_rescue_keep = np.zeros(n_features, dtype=bool)

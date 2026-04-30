@@ -940,3 +940,19 @@ class TestFeatureFilter:
         result = filter_proc.process(df, enable_ratio_rescue=False, ratio_rescue_threshold=3.0)
         assert result.metadata["enabled_thresholds"]["ratio_rescue"] is False
         assert result.metadata["thresholds"]["ratio_rescue"] == 3.0
+
+    def test_ratio_rescue_default_threshold_is_two(self, filter_proc):
+        """Direct core Step4 defaults stay independent from toolkit YAML profiles."""
+        df = pd.DataFrame(
+            {
+                "Mz/RT": ["Sample_Type", "100.000/1.0"],
+                "Tolerance": ["na", "na"],
+                "Case1": ["case", 8000],
+                "Control1": ["control", 8000],
+                "QC1": ["qc", 8000],
+            }
+        )
+
+        result = filter_proc.process(df)
+
+        assert result.metadata["thresholds"]["ratio_rescue"] == 2.0

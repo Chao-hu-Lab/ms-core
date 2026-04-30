@@ -225,7 +225,35 @@ def test_ratio_rescue_keeps_dead_zone_feature() -> None:
     assert result.keep_mask.tolist() == [True]
 
 
-def test_ratio_rescue_rejects_when_min_below_low_det_floor() -> None:
+def test_ratio_rescue_keeps_32_16_with_default_mnar_floor() -> None:
+    df = _two_group_df_counts(a_detected=8, a_total=25, b_detected=4, b_total=25)
+
+    result = _decide(
+        df,
+        _options(qc_ratio=False, mnar=True),
+        _thresholds(background=0.33, high_det=0.8, low_det=0.2, ratio_rescue=2.0),
+    )
+
+    assert result.stable_keep.tolist() == [False]
+    assert result.mnar_keep.tolist() == [False]
+    assert result.ratio_rescue_keep.tolist() == [True]
+    assert result.keep_mask.tolist() == [True]
+
+
+def test_ratio_rescue_rejects_when_any_group_detection_below_ten_percent() -> None:
+    df = _two_group_df_counts(a_detected=3, a_total=10, b_detected=1, b_total=11)
+
+    result = _decide(
+        df,
+        _options(qc_ratio=False, mnar=False),
+        _thresholds(background=0.33, low_det=0.2, ratio_rescue=2.0),
+    )
+
+    assert result.ratio_rescue_keep.tolist() == [False]
+    assert result.keep_mask.tolist() == [False]
+
+
+def test_ratio_rescue_rejects_when_min_below_ten_percent_floor() -> None:
     df = _two_group_df_counts(a_detected=6, a_total=20, b_detected=1, b_total=20)
 
     result = _decide(

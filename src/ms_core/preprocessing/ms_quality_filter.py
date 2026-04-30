@@ -102,7 +102,7 @@ class FeatureFilter(BaseProcessor):
             qc_ratio_threshold: Minimum QC_ratio to keep a feature (0-1)
             intensity_fc_threshold: Minimum fold-change of group mean intensities (>=1)
             ratio_rescue_threshold: Minimum max/min detection-rate ratio to rescue
-                a feature whose minimum group detection rate exceeds low_det_thresh
+                a feature whose minimum group detection rate is at least 10%
                 (>=1, default 2.0). Rescued features are also marked as
                 is_Presence_Absence_Marker=True and bypass QC force-delete.
             enable_background_threshold: Whether to apply stable feature rule
