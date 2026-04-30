@@ -7,13 +7,20 @@ from ms_core.preprocessing.feature_filter_decisions import FeatureFilterDecision
 from ms_core.preprocessing.feature_filter_output import FeatureFilterOutputBuilder
 
 
-def _decision(keep_mask: list[bool], mnar_keep: list[bool] | None = None) -> FeatureFilterDecisionResult:
+def _decision(
+    keep_mask: list[bool],
+    mnar_keep: list[bool] | None = None,
+    ratio_rescue_keep: list[bool] | None = None,
+) -> FeatureFilterDecisionResult:
     n_features = len(keep_mask)
     return FeatureFilterDecisionResult(
         keep_mask=np.array(keep_mask, dtype=bool),
         stable_keep=np.zeros(n_features, dtype=bool),
         mnar_keep=np.array(mnar_keep or [False] * n_features, dtype=bool),
         intensity_fc_keep=np.zeros(n_features, dtype=bool),
+        ratio_rescue_keep=np.array(
+            ratio_rescue_keep or [False] * n_features, dtype=bool
+        ),
         protected_mask=np.zeros(n_features, dtype=bool),
         qc_zero=np.zeros(n_features, dtype=bool),
         qc_low=np.zeros(n_features, dtype=bool),
@@ -96,6 +103,35 @@ def test_presence_absence_marker_column_follows_mnar_mask() -> None:
 
     assert result_df["is_Presence_Absence_Marker"].tolist() == [
         "is_Presence_Absence_Marker",
+        True,
+        False,
+    ]
+
+
+def test_presence_absence_marker_includes_ratio_rescue_rows() -> None:
+    df = pd.DataFrame(
+        {
+            "feature": ["Sample_Type", "mnar_only", "rescue_only", "ordinary"],
+            "A1": ["a", 10, 20, 30],
+            "a_ratio": ["na", 1.0, 1.0, 1.0],
+        }
+    )
+    group_info = {"groups": {"a": [1]}, "qc_cols": [], "has_qc": False}
+
+    result_df, _, _ = FeatureFilterOutputBuilder().build(
+        df,
+        group_info,
+        _decision(
+            [True, True, True],
+            mnar_keep=[True, False, False],
+            ratio_rescue_keep=[False, True, False],
+        ),
+        protected_rows=set(),
+    )
+
+    assert result_df["is_Presence_Absence_Marker"].tolist() == [
+        "is_Presence_Absence_Marker",
+        True,
         True,
         False,
     ]

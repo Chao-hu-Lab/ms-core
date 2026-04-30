@@ -60,6 +60,7 @@ class FeatureFilterConfig:
     default_low_det_thresh: float = 0.2
     default_intensity_fc_threshold: float = 2.0
     default_qc_ratio_threshold: float = 0.0
+    default_ratio_rescue_threshold: float = 2.0
 
     # Excluded sample types (not included in analysis)
     excluded_types: list = field(default_factory=lambda: ["blank", "standard", "sdolek", "qc"])

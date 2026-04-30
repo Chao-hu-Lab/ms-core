@@ -40,7 +40,12 @@ class FeatureFilterOutputBuilder:
 
         mnar_col: list[object] = ["is_Presence_Absence_Marker"]
         for orig_row_idx in rows_to_keep[1:]:
-            mnar_col.append(bool(decision.mnar_keep[orig_row_idx - 1]))
+            mnar_col.append(
+                bool(
+                    decision.mnar_keep[orig_row_idx - 1]
+                    or decision.ratio_rescue_keep[orig_row_idx - 1]
+                )
+            )
         result_df.insert(len(result_df.columns), "is_Presence_Absence_Marker", mnar_col)
 
         zeros_converted = self._convert_sample_zeros_to_nan(
