@@ -12,13 +12,17 @@ ALGORITHM_TEST_FILES = frozenset(
         "test_data_organizer_layout.py",
         "test_data_organizer_method.py",
         "test_data_organizer_step1.py",
+        "test_data_organizer.py",
         "test_degeneracy_annotation.py",
         "test_detection_ratios.py",
+        "test_duplicate_remover.py",
         "test_duplicate_intensity_merge.py",
         "test_feature_filter_decisions.py",
+        "test_feature_filter.py",
         "test_feature_filter_output.py",
         "test_feature_filter_small_n.py",
         "test_feature_groups.py",
+        "test_istd_marker.py",
     }
 )
 

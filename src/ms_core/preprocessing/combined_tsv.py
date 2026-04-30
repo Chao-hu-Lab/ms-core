@@ -72,6 +72,16 @@ class CombinedTsvPreprocessor:
 
         fh_df = df.iloc[:, :split_idx].copy().reset_index(drop=True)
         mz_df = df.iloc[:, split_idx:].copy().reset_index(drop=True)
+        mzmine_id_cols = [
+            c
+            for c in mz_df.columns
+            if re.sub(r"[^a-z0-9]+", "", str(c).strip().lower()) == "mzmineid"
+        ]
+        mzmine_ids = (
+            mz_df[mzmine_id_cols[0]].reset_index(drop=True).tolist()
+            if mzmine_id_cols
+            else []
+        )
 
         valid_mz_cols = [
             c
@@ -110,6 +120,7 @@ class CombinedTsvPreprocessor:
 
         fh_data = fh_result.data.reset_index(drop=True)
         mz_data = mz_result.data.reset_index(drop=True)
+        mz_data = self._restore_mzmine_ids(mz_data, mzmine_ids)
 
         is_mzmine_id = [
             re.sub(r"[^a-z0-9]+", "", str(c).strip().lower()) == "mzmineid"
@@ -141,6 +152,30 @@ class CombinedTsvPreprocessor:
                 else None,
             },
         )
+
+    @staticmethod
+    def _restore_mzmine_ids(mz_data: pd.DataFrame, mzmine_ids: list[Any]) -> pd.DataFrame:
+        """Restore MZmine row IDs after statistics mode preserves the column only."""
+        if not mzmine_ids:
+            return mz_data
+
+        id_cols = [
+            c
+            for c in mz_data.columns
+            if re.sub(r"[^a-z0-9]+", "", str(c).strip().lower()) == "mzmineid"
+        ]
+        if not id_cols:
+            return mz_data
+
+        restored = list(mzmine_ids)
+        if len(mz_data) == len(restored) + 1:
+            restored = [pd.NA] + restored
+        elif len(mz_data) != len(restored):
+            return mz_data
+
+        result = mz_data.copy()
+        result[id_cols[0]] = restored
+        return result
 
     @staticmethod
     def post_vba_cleanup(df: pd.DataFrame) -> pd.DataFrame:

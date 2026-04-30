@@ -25,6 +25,12 @@ def test_algorithm_marker_selects_processing_regressions() -> None:
     data_organizer_step1 = classify_test_markers(
         Path("tests") / "test_data_organizer_step1.py"
     )
+    migrated_data_organizer = classify_test_markers(Path("tests") / "test_data_organizer.py")
+    migrated_duplicate_remover = classify_test_markers(
+        Path("tests") / "test_duplicate_remover.py"
+    )
+    migrated_feature_filter = classify_test_markers(Path("tests") / "test_feature_filter.py")
+    migrated_istd_marker = classify_test_markers(Path("tests") / "test_istd_marker.py")
     degeneracy = classify_test_markers(Path("tests") / "test_degeneracy_annotation.py")
     detection_ratios = classify_test_markers(Path("tests") / "test_detection_ratios.py")
     duplicate_merge = classify_test_markers(Path("tests") / "test_duplicate_intensity_merge.py")
@@ -39,6 +45,10 @@ def test_algorithm_marker_selects_processing_regressions() -> None:
     assert data_organizer_layout == {"algorithm"}
     assert data_organizer_method == {"algorithm"}
     assert data_organizer_step1 == {"algorithm"}
+    assert migrated_data_organizer == {"algorithm"}
+    assert migrated_duplicate_remover == {"algorithm"}
+    assert migrated_feature_filter == {"algorithm"}
+    assert migrated_istd_marker == {"algorithm"}
     assert degeneracy == {"algorithm"}
     assert detection_ratios == {"algorithm"}
     assert duplicate_merge == {"algorithm"}
