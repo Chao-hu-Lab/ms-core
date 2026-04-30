@@ -40,6 +40,15 @@ class FeatureFilterDecisionResult:
     qc_zero: np.ndarray
     qc_low: np.ndarray
     qc_force_delete: np.ndarray
+    all_groups_pass_background: np.ndarray
+    any_group_zero: np.ndarray
+    any_group_nonzero: np.ndarray
+    imputation_tag: np.ndarray
+    tag_reason_structural: np.ndarray
+    tag_reason_low_overall: np.ndarray
+    unfiltered_keep: np.ndarray
+    analysis_ratio_matrix: np.ndarray
+    analysis_group_names: list[str]
     stats: dict[str, Any]
 
 
@@ -75,6 +84,10 @@ class FeatureFilterDecisionTable:
         }
 
         group_names = list(group_info["groups"].keys())
+        n_analysis_groups = len(group_names)
+        if n_analysis_groups == 0:
+            raise ValueError("Feature filtering requires at least one analysis group")
+
         has_qc = group_info["has_qc"]
         qc_ratio_col = ratio_cols.get("QC")
         n_features = len(df) - 1
@@ -112,6 +125,10 @@ class FeatureFilterDecisionTable:
         else:
             qc_zero = np.zeros(n_features, dtype=bool)
             qc_low = np.zeros(n_features, dtype=bool)
+
+        all_groups_pass_background = (ratio_matrix >= thresholds.background).all(axis=1)
+        any_group_zero = (ratio_matrix == 0.0).any(axis=1)
+        any_group_nonzero = (ratio_matrix > 0.0).any(axis=1)
 
         if ratio_matrix.shape[1] > 0:
             mnar_keep = (
@@ -169,7 +186,8 @@ class FeatureFilterDecisionTable:
         positive_rules = []
         if options.enable_background:
             positive_rules.append(stable_keep)
-        positive_rules.append(mnar_keep)
+        if options.enable_mnar:
+            positive_rules.append(mnar_keep)
         if options.enable_intensity_fc:
             positive_rules.append(intensity_fc_keep)
         if options.enable_ratio_rescue:
@@ -184,6 +202,20 @@ class FeatureFilterDecisionTable:
             (qc_zero | qc_low) & ~protected_mask & ~mnar_keep & ~ratio_rescue_keep
         )
         keep_mask = np.where(qc_force_delete, False, keep_mask)
+
+        structural_absence_applies = (
+            any_group_zero & any_group_nonzero
+            if n_analysis_groups >= 2
+            else np.zeros(n_features, dtype=bool)
+        )
+        model_imputable = all_groups_pass_background & ~structural_absence_applies
+        imputation_tag = ~model_imputable
+        tag_reason_structural = structural_absence_applies & keep_mask
+        tag_reason_low_overall = ~all_groups_pass_background & keep_mask
+        positive_keep_reason = (
+            stable_keep | mnar_keep | intensity_fc_keep | ratio_rescue_keep
+        )
+        unfiltered_keep = keep_mask & ~protected_mask & ~positive_keep_reason
 
         non_protected = ~protected_mask
         effective = non_protected & ~qc_force_delete
@@ -248,5 +280,14 @@ class FeatureFilterDecisionTable:
             qc_zero=qc_zero,
             qc_low=qc_low,
             qc_force_delete=qc_force_delete,
+            all_groups_pass_background=all_groups_pass_background,
+            any_group_zero=any_group_zero,
+            any_group_nonzero=any_group_nonzero,
+            imputation_tag=imputation_tag,
+            tag_reason_structural=tag_reason_structural,
+            tag_reason_low_overall=tag_reason_low_overall,
+            unfiltered_keep=unfiltered_keep,
+            analysis_ratio_matrix=ratio_matrix,
+            analysis_group_names=group_names,
             stats=stats,
         )

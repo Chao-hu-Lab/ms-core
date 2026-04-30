@@ -101,8 +101,9 @@ class FeatureFilter(BaseProcessor):
             intensity_fc_threshold: Minimum fold-change of group mean intensities (>=1)
             ratio_rescue_threshold: Minimum max/min detection-rate ratio to rescue
                 a feature whose minimum group detection rate is at least 10%
-                (>=1, default 2.0). Rescued features are also marked as
-                is_Presence_Absence_Marker=True and bypass QC force-delete.
+                (>=1, default 2.0). Rescued features bypass QC force-delete.
+                is_Presence_Absence_Marker is computed separately from the
+                analysis-group detection profile.
             enable_background_threshold: Whether to apply stable feature rule
             enable_qc_ratio_threshold: Whether to apply QC-based deletion rules
             enable_intensity_fc_threshold: Whether to apply intensity fold-change rule

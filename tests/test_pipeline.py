@@ -19,6 +19,7 @@ from ms_core.pipeline import (
     _dataset_to_calibration_df,
     _calibration_df_to_dataset,
 )
+from ms_core.utils.sample_classification import identify_sample_columns
 
 
 @pytest.fixture
@@ -56,6 +57,25 @@ class TestStepRegistry:
         assert len(steps) == TOTAL_STEPS
         assert steps[0].number == 1
         assert steps[-1].number == 11
+
+
+def test_step4_metadata_columns_are_excluded_from_sample_column_fallback() -> None:
+    df = pd.DataFrame(
+        {
+            "FeatureID": ["f1"],
+            "Sample_A": [100.0],
+            "is_Presence_Absence_Marker": [False],
+            "Feature_Filter_Keep_Reasons": ["stable"],
+            "Imputation_Tag_Reasons": [""],
+            "Detection_Profile": ["a=1.00|b=1.00"],
+            "Feature_Filter_Delete_Reasons": ["no_keep_rule"],
+        }
+    )
+    unmatched_sample_info = pd.DataFrame({"Sample_Name": ["not_in_matrix"]})
+
+    sample_columns, _ = identify_sample_columns(df, unmatched_sample_info)
+
+    assert sample_columns == ["Sample_A"]
 
 
 class TestStep4MissingValue:
@@ -269,6 +289,25 @@ class TestCalibrationInMemory:
         cal_df = _dataset_to_calibration_df(ds)
         restored = _calibration_df_to_dataset(cal_df, ds, step_num=5)
         pd.testing.assert_series_equal(restored.labels, ds.labels)
+
+    def test_calibration_df_to_dataset_drops_step4_metadata_columns(self, calibration_dataset):
+        ds = calibration_dataset
+        cal_df = _dataset_to_calibration_df(ds)
+        cal_df["is_Presence_Absence_Marker"] = False
+        cal_df["Feature_Filter_Keep_Reasons"] = "stable"
+        cal_df["Imputation_Tag_Reasons"] = ""
+        cal_df["Detection_Profile"] = "control=1.00|exposed=1.00"
+
+        restored = _calibration_df_to_dataset(cal_df, ds, step_num=5)
+
+        for column in (
+            "is_Presence_Absence_Marker",
+            "Feature_Filter_Keep_Reasons",
+            "Imputation_Tag_Reasons",
+            "Detection_Profile",
+        ):
+            assert column not in restored.matrix.columns
+        assert restored.matrix.shape == ds.matrix.shape
 
     def test_calibration_df_orientation(self, calibration_dataset):
         """Calibration df should have features as rows, samples as columns."""

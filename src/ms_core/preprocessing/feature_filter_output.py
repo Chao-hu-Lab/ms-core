@@ -13,6 +13,19 @@ from ms_core.preprocessing.feature_filter_decisions import FeatureFilterDecision
 class FeatureFilterOutputBuilder:
     """Build filtered Step4 output frames from decision masks."""
 
+    _KEEP_REASON_MASKS = (
+        ("stable", "stable_keep"),
+        ("mnar", "mnar_keep"),
+        ("intensity_fc", "intensity_fc_keep"),
+        ("ratio_rescue", "ratio_rescue_keep"),
+        ("protected", "protected_mask"),
+        ("unfiltered", "unfiltered_keep"),
+    )
+    _TAG_REASON_MASKS = (
+        ("structural_absence", "tag_reason_structural"),
+        ("low_overall_detection", "tag_reason_low_overall"),
+    )
+
     def build(
         self,
         df: pd.DataFrame,
@@ -29,7 +42,13 @@ class FeatureFilterOutputBuilder:
             if keep:
                 rows_to_keep.append(i)
             else:
-                deleted_features.append(df.iloc[i].copy())
+                deleted_features.append(
+                    self._with_deleted_diagnostics(
+                        df.iloc[i].copy(),
+                        decision,
+                        feature_pos=i - 1,
+                    )
+                )
 
         row_mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(rows_to_keep)}
         stats["red_font_rows"] = sorted(
@@ -39,14 +58,33 @@ class FeatureFilterOutputBuilder:
         result_df = df.iloc[rows_to_keep].reset_index(drop=True).copy()
 
         mnar_col: list[object] = ["is_Presence_Absence_Marker"]
+        keep_reasons_col: list[object] = ["Feature_Filter_Keep_Reasons"]
+        tag_reasons_col: list[object] = ["Imputation_Tag_Reasons"]
+        detection_profile_col: list[object] = ["Detection_Profile"]
         for orig_row_idx in rows_to_keep[1:]:
-            mnar_col.append(
-                bool(
-                    decision.mnar_keep[orig_row_idx - 1]
-                    or decision.ratio_rescue_keep[orig_row_idx - 1]
+            feature_pos = orig_row_idx - 1
+            mnar_col.append(bool(decision.imputation_tag[feature_pos]))
+            keep_reasons_col.append(self._compose_keep_reasons(decision, feature_pos))
+            tag_reasons_col.append(self._compose_tag_reasons(decision, feature_pos))
+            detection_profile_col.append(
+                self._compose_detection_profile(
+                    decision.analysis_ratio_matrix[feature_pos],
+                    decision.analysis_group_names,
                 )
             )
-        result_df.insert(len(result_df.columns), "is_Presence_Absence_Marker", mnar_col)
+        marker_idx = len(result_df.columns)
+        result_df.insert(marker_idx, "is_Presence_Absence_Marker", mnar_col)
+        result_df.insert(
+            marker_idx + 1,
+            "Feature_Filter_Keep_Reasons",
+            keep_reasons_col,
+        )
+        result_df.insert(
+            marker_idx + 2,
+            "Imputation_Tag_Reasons",
+            tag_reasons_col,
+        )
+        result_df.insert(marker_idx + 3, "Detection_Profile", detection_profile_col)
 
         zeros_converted = self._convert_sample_zeros_to_nan(
             result_df,
@@ -56,6 +94,82 @@ class FeatureFilterOutputBuilder:
             stats["zeros_converted_to_nan"] = zeros_converted
 
         return result_df, deleted_features, stats
+
+    @classmethod
+    def _compose_keep_reasons(
+        cls,
+        decision: FeatureFilterDecisionResult,
+        feature_pos: int,
+    ) -> str:
+        tokens = [
+            token
+            for token, attr_name in cls._KEEP_REASON_MASKS
+            if bool(getattr(decision, attr_name)[feature_pos])
+        ]
+        return "|".join(tokens)
+
+    @classmethod
+    def _compose_tag_reasons(
+        cls,
+        decision: FeatureFilterDecisionResult,
+        feature_pos: int,
+    ) -> str:
+        tokens = [
+            token
+            for token, attr_name in cls._TAG_REASON_MASKS
+            if bool(getattr(decision, attr_name)[feature_pos])
+        ]
+        return "|".join(tokens)
+
+    @staticmethod
+    def _compose_detection_profile(
+        ratio_row: np.ndarray,
+        group_names: list[str],
+    ) -> str:
+        return "|".join(
+            f"{group_name}={float(ratio):.2f}"
+            for group_name, ratio in zip(group_names, ratio_row, strict=True)
+        )
+
+    @classmethod
+    def _with_deleted_diagnostics(
+        cls,
+        row: pd.Series,
+        decision: FeatureFilterDecisionResult,
+        feature_pos: int,
+    ) -> pd.Series:
+        row["Feature_Filter_Delete_Reasons"] = cls._compose_delete_reasons(
+            decision,
+            feature_pos,
+        )
+        row["Detection_Profile"] = cls._compose_detection_profile(
+            decision.analysis_ratio_matrix[feature_pos],
+            decision.analysis_group_names,
+        )
+        return row
+
+    @staticmethod
+    def _compose_delete_reasons(
+        decision: FeatureFilterDecisionResult,
+        feature_pos: int,
+    ) -> str:
+        tokens: list[str] = []
+        if bool(decision.qc_zero[feature_pos]):
+            tokens.append("qc_zero")
+        elif bool(decision.qc_low[feature_pos]):
+            tokens.append("qc_low")
+
+        positive_keep_reason = bool(
+            decision.stable_keep[feature_pos]
+            or decision.mnar_keep[feature_pos]
+            or decision.intensity_fc_keep[feature_pos]
+            or decision.ratio_rescue_keep[feature_pos]
+            or decision.protected_mask[feature_pos]
+        )
+        if not positive_keep_reason:
+            tokens.append("no_keep_rule")
+
+        return "|".join(tokens)
 
     @staticmethod
     def _convert_sample_zeros_to_nan(

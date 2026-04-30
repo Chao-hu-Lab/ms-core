@@ -100,6 +100,12 @@ NON_SAMPLE_COLUMNS = {
     'Frac_Strategy',
     # Additional metadata columns
     'mz', 'rt', 'm/z', 'Mass', 'Retention_Time',
+    # Step4 feature-filter metadata columns
+    'is_Presence_Absence_Marker',
+    'Feature_Filter_Keep_Reasons',
+    'Imputation_Tag_Reasons',
+    'Detection_Profile',
+    'Feature_Filter_Delete_Reasons',
 }
 
 # Keywords that identify derived statistical columns
