@@ -89,13 +89,13 @@ def _decide(
     )
 
 
-def test_wilson_lower_bound_for_small_n_groups() -> None:
+def test_small_n_groups_use_observed_detection_ratio() -> None:
     df = _two_group_df([6000, 6000, 6000, 6000, 0], [6000, 6000, 6000, 6000, 0])
 
     result = _decide(df, _options(qc_ratio=False, mnar=False))
 
-    assert result.stable_keep.tolist() == [False]
-    assert result.keep_mask.tolist() == [False]
+    assert result.stable_keep.tolist() == [True]
+    assert result.keep_mask.tolist() == [True]
 
 
 def test_stable_gate_keeps_when_two_groups_pass_threshold() -> None:

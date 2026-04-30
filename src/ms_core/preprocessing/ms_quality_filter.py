@@ -40,8 +40,6 @@ class FeatureFilter(BaseProcessor):
     4. Removes features with QC_ratio = 0 or below threshold
     """
 
-    _SMALL_N_THRESHOLD: int = 10
-
     def __init__(self, config: Optional[FeatureFilterConfig] = None):
         """
         Initialize the Feature Filter.
@@ -354,20 +352,6 @@ class FeatureFilter(BaseProcessor):
             numeric_block,
         )
         return FeatureFilterOutputBuilder().build(df, group_info, decision, protected_rows)
-
-    @staticmethod
-    def _wilson_lower_vec(p: np.ndarray, n: int, z: float = 1.96) -> np.ndarray:
-        """Return the 95% Wilson CI lower bound for each proportion in *p*.
-
-        Args:
-            p: Array of observed proportions in [0, 1].
-            n: Sample size (integer).  When 0, returns an all-zero array.
-            z: Z-score for the desired confidence level (default 1.96 → 95%).
-
-        Returns:
-            Array of lower-bound proportions, clipped to [0, 1].
-        """
-        return FeatureFilterDecisionTable.wilson_lower_vec(p, n, z)
 
     def _get_max_ratio_diff(self, ratios: List[float]) -> float:
         """Calculate maximum difference between any two ratios."""

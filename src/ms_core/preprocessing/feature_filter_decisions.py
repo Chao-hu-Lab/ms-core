@@ -46,7 +46,6 @@ class FeatureFilterDecisionResult:
 class FeatureFilterDecisionTable:
     """Apply Step4 feature keep/delete gates without shaping output rows."""
 
-    _SMALL_N_THRESHOLD: int = 10
     _RATIO_RESCUE_MIN_DETECTION: float = 0.10
 
     def decide(
@@ -115,14 +114,8 @@ class FeatureFilterDecisionTable:
             qc_low = np.zeros(n_features, dtype=bool)
 
         if ratio_matrix.shape[1] > 0:
-            effective_matrix = ratio_matrix.copy()
-            for j, group_name in enumerate(group_names):
-                n_group = len(group_info["groups"][group_name])
-                if n_group < self._SMALL_N_THRESHOLD:
-                    effective_matrix[:, j] = self.wilson_lower_vec(ratio_matrix[:, j], n_group)
-
             mnar_keep = (
-                (effective_matrix >= thresholds.high_det).any(axis=1)
+                (ratio_matrix >= thresholds.high_det).any(axis=1)
                 & (ratio_matrix <= thresholds.low_det).any(axis=1)
                 if (options.enable_mnar and ratio_matrix.shape[1] >= 2)
                 else np.zeros(n_features, dtype=bool)
@@ -132,9 +125,7 @@ class FeatureFilterDecisionTable:
                 required_groups = (
                     1 if (options.allow_single_group_stable and n_groups == 1) else 2
                 )
-                stable_keep = (
-                    (effective_matrix >= thresholds.background).sum(axis=1) >= required_groups
-                )
+                stable_keep = (ratio_matrix >= thresholds.background).sum(axis=1) >= required_groups
             else:
                 stable_keep = np.zeros(n_features, dtype=bool)
         else:
@@ -259,14 +250,3 @@ class FeatureFilterDecisionTable:
             qc_force_delete=qc_force_delete,
             stats=stats,
         )
-
-    @staticmethod
-    def wilson_lower_vec(p: np.ndarray, n: int, z: float = 1.96) -> np.ndarray:
-        """Return the 95% Wilson CI lower bound for each proportion in *p*."""
-        if n == 0:
-            return np.zeros_like(p, dtype=float)
-        z2 = z * z
-        n_f = float(n)
-        numerator = p + z2 / (2 * n_f) - z * np.sqrt(p * (1 - p) / n_f + z2 / (4 * n_f * n_f))
-        denominator = 1.0 + z2 / n_f
-        return np.clip(numerator / denominator, 0.0, 1.0)
