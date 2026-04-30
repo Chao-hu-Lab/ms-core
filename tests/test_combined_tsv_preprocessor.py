@@ -71,6 +71,33 @@ def test_process_combined_splits_sides_and_restores_mzmine_id_order() -> None:
     assert result.metadata["sample_info"].to_dict("list") == {"Sample_Name": ["SampleA"]}
 
 
+def test_process_combined_and_fix_preserves_mzmine_id_values_for_filtering() -> None:
+    from ms_core.preprocessing.data_organizer import DataOrganizer
+
+    df = pd.DataFrame(
+        {
+            "Mz": [100.0, 200.0],
+            "RT": [1.0, 2.0],
+            "SampleA": [10.0, 20.0],
+            "SampleB": [0.0, 30.0],
+            "MZmine ID": ["mz1", pd.NA],
+            "MZmine m/z": [100.001, pd.NA],
+            "MZmine RT (min)": [1.1, pd.NA],
+            "SampleA.mzML Peak area": [100.0, pd.NA],
+            "SampleB.mzML Peak area": [0.0, pd.NA],
+        }
+    )
+
+    result = DataOrganizer().process(df, mode="combined_fix")
+
+    assert result.success
+    assert result.data.shape[0] == 1
+    assert result.data.iloc[0]["Mz"] == 100.001
+    assert result.data.iloc[0]["RT"] == 1.1
+    assert result.data.iloc[0]["SampleA"] == 6000.0
+    assert pd.isna(result.data.iloc[0]["SampleB"])
+
+
 def test_false_positive_fix_treats_zero_as_missing_and_clears_zero_outputs() -> None:
     preprocessor = CombinedTsvPreprocessor()
     df = pd.DataFrame(
