@@ -81,10 +81,12 @@ class FeatureFilter(BaseProcessor):
         low_det_thresh: Optional[float] = None,
         qc_ratio_threshold: Optional[float] = None,
         intensity_fc_threshold: Optional[float] = None,
+        ratio_rescue_threshold: Optional[float] = None,
         enable_background_threshold: bool = True,
         enable_qc_ratio_threshold: bool = True,
         enable_intensity_fc_threshold: bool = False,
         enable_mnar_gate: bool = True,
+        enable_ratio_rescue: bool = True,
         allow_single_group_stable: bool = False,
         protected_rows: Optional[Set[int]] = None,
         **kwargs,
@@ -99,10 +101,16 @@ class FeatureFilter(BaseProcessor):
             low_det_thresh: MNAR low detection rate threshold (0-1, default 0.2)
             qc_ratio_threshold: Minimum QC_ratio to keep a feature (0-1)
             intensity_fc_threshold: Minimum fold-change of group mean intensities (>=1)
+            ratio_rescue_threshold: Minimum max/min detection-rate ratio to rescue
+                a feature whose minimum group detection rate exceeds low_det_thresh
+                (>=1, default 2.0). Rescued features are also marked as
+                is_Presence_Absence_Marker=True and bypass QC force-delete.
             enable_background_threshold: Whether to apply stable feature rule
             enable_qc_ratio_threshold: Whether to apply QC-based deletion rules
             enable_intensity_fc_threshold: Whether to apply intensity fold-change rule
             enable_mnar_gate: Whether to apply the MNAR 80/20 presence/absence rule
+            enable_ratio_rescue: Whether to apply the detection-rate ratio rescue
+                rule (default True)
             allow_single_group_stable: When True and only 1 analysis group exists,
                 degrade the stable gate to require only that single group to meet
                 the background threshold (instead of the usual >= 2 groups).
@@ -152,6 +160,11 @@ class FeatureFilter(BaseProcessor):
             if intensity_fc_threshold is not None
             else self.config.default_intensity_fc_threshold
         )
+        ratio_rescue_thresh = (
+            ratio_rescue_threshold
+            if ratio_rescue_threshold is not None
+            else self.config.default_ratio_rescue_threshold
+        )
 
         # Validate input
         is_valid, error_msg = self.validate_input(df)
@@ -194,10 +207,12 @@ class FeatureFilter(BaseProcessor):
                 low_thresh,
                 qc_ratio_thresh,
                 intensity_fc_thresh,
+                ratio_rescue_thresh,
                 enable_background_threshold,
                 enable_qc_ratio_threshold,
                 enable_intensity_fc_threshold,
                 enable_mnar_gate,
+                enable_ratio_rescue,
                 allow_single_group_stable,
                 protected_rows or set(),
                 numeric_block,
@@ -232,12 +247,14 @@ class FeatureFilter(BaseProcessor):
                         "low_det": low_thresh,
                         "qc_ratio": qc_ratio_thresh,
                         "intensity_fc": intensity_fc_thresh,
+                        "ratio_rescue": ratio_rescue_thresh,
                     },
                     "enabled_thresholds": {
                         "background": bool(enable_background_threshold),
                         "qc_ratio": bool(enable_qc_ratio_threshold),
                         "intensity_fc": bool(enable_intensity_fc_threshold),
                         "mnar_gate": bool(enable_mnar_gate),
+                        "ratio_rescue": bool(enable_ratio_rescue),
                         "single_group_stable": bool(allow_single_group_stable),
                     },
                     "deleted_features": deleted_features,
@@ -296,10 +313,12 @@ class FeatureFilter(BaseProcessor):
         low_det_thresh: float,
         qc_ratio_threshold: float,
         intensity_fc_threshold: float,
+        ratio_rescue_threshold: float,
         enable_background_threshold: bool,
         enable_qc_ratio_threshold: bool,
         enable_intensity_fc_threshold: bool,
         enable_mnar_gate: bool,
+        enable_ratio_rescue: bool,
         allow_single_group_stable: bool,
         protected_rows: Set[int],
         numeric_block: Dict[str, Any],
@@ -315,6 +334,7 @@ class FeatureFilter(BaseProcessor):
             low_det=low_det_thresh,
             qc_ratio=qc_ratio_threshold,
             intensity_fc=intensity_fc_threshold,
+            ratio_rescue=ratio_rescue_threshold,
         )
         options = FeatureFilterOptions(
             enable_background=enable_background_threshold,
@@ -322,6 +342,7 @@ class FeatureFilter(BaseProcessor):
             enable_intensity_fc=enable_intensity_fc_threshold,
             enable_mnar=enable_mnar_gate,
             allow_single_group_stable=allow_single_group_stable,
+            enable_ratio_rescue=enable_ratio_rescue,
         )
         decision = FeatureFilterDecisionTable().decide(
             df,

@@ -16,6 +16,7 @@ class FeatureFilterThresholds:
     low_det: float
     qc_ratio: float
     intensity_fc: float
+    ratio_rescue: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class FeatureFilterOptions:
     enable_intensity_fc: bool
     enable_mnar: bool
     allow_single_group_stable: bool
+    enable_ratio_rescue: bool = True
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class FeatureFilterDecisionResult:
     stable_keep: np.ndarray
     mnar_keep: np.ndarray
     intensity_fc_keep: np.ndarray
+    ratio_rescue_keep: np.ndarray
     protected_mask: np.ndarray
     qc_zero: np.ndarray
     qc_low: np.ndarray
@@ -61,12 +64,14 @@ class FeatureFilterDecisionTable:
             "stable_kept": 0,
             "mnar_kept": 0,
             "intensity_fc_kept": 0,
+            "ratio_rescue_kept": 0,
             "qc_zero_deleted": 0,
             "qc_low_deleted": 0,
             "protected_kept": 0,
             "unique_stable_kept": 0,
             "unique_mnar_kept": 0,
             "unique_intensity_fc_kept": 0,
+            "unique_ratio_rescue_kept": 0,
         }
 
         group_names = list(group_info["groups"].keys())
@@ -156,19 +161,36 @@ class FeatureFilterDecisionTable:
         else:
             intensity_fc_keep = np.zeros(n_features, dtype=bool)
 
+        if options.enable_ratio_rescue and ratio_matrix.shape[1] >= 2:
+            detection_max = ratio_matrix.max(axis=1)
+            detection_min = ratio_matrix.min(axis=1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                det_ratio = np.where(
+                    detection_min > 0, detection_max / detection_min, 0.0
+                )
+            ratio_rescue_keep = (det_ratio >= thresholds.ratio_rescue) & (
+                detection_min > thresholds.low_det
+            )
+        else:
+            ratio_rescue_keep = np.zeros(n_features, dtype=bool)
+
         positive_rules = []
         if options.enable_background:
             positive_rules.append(stable_keep)
         positive_rules.append(mnar_keep)
         if options.enable_intensity_fc:
             positive_rules.append(intensity_fc_keep)
+        if options.enable_ratio_rescue:
+            positive_rules.append(ratio_rescue_keep)
 
         if positive_rules:
             keep_mask = protected_mask | np.logical_or.reduce(positive_rules)
         else:
             keep_mask = np.ones(n_features, dtype=bool)
 
-        qc_force_delete = (qc_zero | qc_low) & ~protected_mask & ~mnar_keep
+        qc_force_delete = (
+            (qc_zero | qc_low) & ~protected_mask & ~mnar_keep & ~ratio_rescue_keep
+        )
         keep_mask = np.where(qc_force_delete, False, keep_mask)
 
         non_protected = ~protected_mask
@@ -178,17 +200,49 @@ class FeatureFilterDecisionTable:
         stats["stable_kept"] = int((stable_keep & non_protected).sum())
         stats["mnar_kept"] = int((mnar_keep & non_protected).sum())
         stats["intensity_fc_kept"] = int((intensity_fc_keep & non_protected).sum())
+        stats["ratio_rescue_kept"] = int((ratio_rescue_keep & non_protected).sum())
         stats["unique_stable_kept"] = int(
-            (stable_keep & ~mnar_keep & ~intensity_fc_keep & effective).sum()
+            (
+                stable_keep
+                & ~mnar_keep
+                & ~intensity_fc_keep
+                & ~ratio_rescue_keep
+                & effective
+            ).sum()
         )
         stats["unique_mnar_kept"] = int(
-            (mnar_keep & ~stable_keep & ~intensity_fc_keep & effective).sum()
+            (
+                mnar_keep
+                & ~stable_keep
+                & ~intensity_fc_keep
+                & ~ratio_rescue_keep
+                & effective
+            ).sum()
         )
         stats["unique_intensity_fc_kept"] = int(
-            (intensity_fc_keep & ~stable_keep & ~mnar_keep & effective).sum()
+            (
+                intensity_fc_keep
+                & ~stable_keep
+                & ~mnar_keep
+                & ~ratio_rescue_keep
+                & effective
+            ).sum()
         )
-        stats["qc_zero_deleted"] = int((qc_zero & non_protected & ~mnar_keep).sum())
-        stats["qc_low_deleted"] = int((qc_low & non_protected & ~mnar_keep).sum())
+        stats["unique_ratio_rescue_kept"] = int(
+            (
+                ratio_rescue_keep
+                & ~stable_keep
+                & ~mnar_keep
+                & ~intensity_fc_keep
+                & effective
+            ).sum()
+        )
+        stats["qc_zero_deleted"] = int(
+            (qc_zero & non_protected & ~mnar_keep & ~ratio_rescue_keep).sum()
+        )
+        stats["qc_low_deleted"] = int(
+            (qc_low & non_protected & ~mnar_keep & ~ratio_rescue_keep).sum()
+        )
         stats["kept_count"] = int(keep_mask.sum())
         stats["deleted_count"] = int((~keep_mask).sum())
 
@@ -197,6 +251,7 @@ class FeatureFilterDecisionTable:
             stable_keep=stable_keep,
             mnar_keep=mnar_keep,
             intensity_fc_keep=intensity_fc_keep,
+            ratio_rescue_keep=ratio_rescue_keep,
             protected_mask=protected_mask,
             qc_zero=qc_zero,
             qc_low=qc_low,

@@ -865,3 +865,78 @@ class TestFeatureFilter:
         result_on = filter_proc.process(df, enable_mnar_gate=True)
         assert result_off.metadata["enabled_thresholds"]["mnar_gate"] is False
         assert result_on.metadata["enabled_thresholds"]["mnar_gate"] is True
+
+    def test_ratio_rescue_keeps_dead_zone_feature_end_to_end(self, filter_proc):
+        """A 40%/20% dead-zone feature is kept by ratio rescue and marked PA."""
+        case_values = [8000] * 4 + [0] * 6
+        control_values = [8000] * 2 + [0] * 8
+        df = pd.DataFrame(
+            {
+                "Mz/RT": ["Sample_Type", "100.000/1.0"],
+                "Tolerance": ["na", "na"],
+                **{f"Case{i}": ["case", case_values[i - 1]] for i in range(1, 11)},
+                **{f"Control{i}": ["control", control_values[i - 1]] for i in range(1, 11)},
+                "QC1": ["qc", 8000],
+            }
+        )
+        result = filter_proc.process(
+            df,
+            background_threshold=0.5,
+            high_det_thresh=0.5,
+            low_det_thresh=0.1,
+            ratio_rescue_threshold=2.0,
+            enable_background_threshold=True,
+            enable_qc_ratio_threshold=False,
+            enable_intensity_fc_threshold=False,
+            enable_mnar_gate=True,
+            enable_ratio_rescue=True,
+        )
+
+        assert result.success
+        assert "100.000/1.0" in result.data["Mz/RT"].tolist()
+        feature_row = result.data[result.data["Mz/RT"] == "100.000/1.0"]
+        assert bool(feature_row["is_Presence_Absence_Marker"].iloc[0]) is True
+
+    def test_ratio_rescue_disabled_drops_dead_zone_feature(self, filter_proc):
+        """With enable_ratio_rescue=False, the same feature is dropped."""
+        case_values = [8000] * 4 + [0] * 6
+        control_values = [8000] * 2 + [0] * 8
+        df = pd.DataFrame(
+            {
+                "Mz/RT": ["Sample_Type", "100.000/1.0"],
+                "Tolerance": ["na", "na"],
+                **{f"Case{i}": ["case", case_values[i - 1]] for i in range(1, 11)},
+                **{f"Control{i}": ["control", control_values[i - 1]] for i in range(1, 11)},
+                "QC1": ["qc", 8000],
+            }
+        )
+        result = filter_proc.process(
+            df,
+            background_threshold=0.5,
+            high_det_thresh=0.5,
+            low_det_thresh=0.1,
+            ratio_rescue_threshold=2.0,
+            enable_background_threshold=True,
+            enable_qc_ratio_threshold=False,
+            enable_intensity_fc_threshold=False,
+            enable_mnar_gate=True,
+            enable_ratio_rescue=False,
+        )
+
+        assert result.success
+        assert "100.000/1.0" not in result.data["Mz/RT"].tolist()
+
+    def test_ratio_rescue_metadata_records_enabled_state(self, filter_proc):
+        """enable_ratio_rescue and threshold are reflected in metadata."""
+        df = pd.DataFrame(
+            {
+                "Mz/RT": ["Sample_Type", "100.000/1.0"],
+                "Tolerance": ["na", "na"],
+                "Case1": ["case", 8000],
+                "Control1": ["control", 8000],
+                "QC1": ["qc", 8000],
+            }
+        )
+        result = filter_proc.process(df, enable_ratio_rescue=False, ratio_rescue_threshold=3.0)
+        assert result.metadata["enabled_thresholds"]["ratio_rescue"] is False
+        assert result.metadata["thresholds"]["ratio_rescue"] == 3.0
