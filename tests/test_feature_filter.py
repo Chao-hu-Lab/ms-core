@@ -632,11 +632,11 @@ class TestFeatureFilter:
         assert result.success
         assert "is_Presence_Absence_Marker" in result.data.columns
         marker_idx = result.data.columns.get_loc("is_Presence_Absence_Marker")
-        assert result.data.columns[marker_idx + 1 : marker_idx + 4].tolist() == [
+        assert result.data.columns[marker_idx + 1 : marker_idx + 3].tolist() == [
             "Feature_Filter_Keep_Reasons",
             "Imputation_Tag_Reasons",
-            "Detection_Profile",
         ]
+        assert "Detection_Profile" not in result.data.columns
 
     def test_contract_flip_ratio_rescue_can_route_to_model_imputable_false_tag(
         self, filter_proc
@@ -698,7 +698,10 @@ class TestFeatureFilter:
         deleted = result.metadata["deleted_features"][0]
         assert deleted["Mz/RT"] == "100.000/1.0"
         assert deleted["Feature_Filter_Delete_Reasons"] == "no_keep_rule"
-        assert deleted["Detection_Profile"] == "a=0.18|b=0.18|c=0.18"
+        assert deleted["a_ratio"] == pytest.approx(0.18)
+        assert deleted["b_ratio"] == pytest.approx(0.18)
+        assert deleted["c_ratio"] == pytest.approx(0.18)
+        assert "Detection_Profile" not in deleted.index
 
     def test_mnar_feature_is_marked_true_in_output(self, filter_proc):
         """A feature that passes the MNAR 80/20 rule must have is_Presence_Absence_Marker=True."""

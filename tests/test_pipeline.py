@@ -67,7 +67,11 @@ def test_step4_metadata_columns_are_excluded_from_sample_column_fallback() -> No
             "is_Presence_Absence_Marker": [False],
             "Feature_Filter_Keep_Reasons": ["stable"],
             "Imputation_Tag_Reasons": [""],
-            "Detection_Profile": ["a=1.00|b=1.00"],
+            "exposure_ratio": [1.0],
+            "normal_ratio": [0.89],
+            "control_ratio": [1.0],
+            "QC_ratio": [1.0],
+            "Detection_Profile": ["legacy display-only metadata"],
             "Feature_Filter_Delete_Reasons": ["no_keep_rule"],
         }
     )
@@ -296,7 +300,11 @@ class TestCalibrationInMemory:
         cal_df["is_Presence_Absence_Marker"] = False
         cal_df["Feature_Filter_Keep_Reasons"] = "stable"
         cal_df["Imputation_Tag_Reasons"] = ""
-        cal_df["Detection_Profile"] = "control=1.00|exposed=1.00"
+        cal_df["exposure_ratio"] = 1.0
+        cal_df["normal_ratio"] = 0.89
+        cal_df["control_ratio"] = 1.0
+        cal_df["QC_ratio"] = 1.0
+        cal_df["Detection_Profile"] = "legacy display-only metadata"
 
         restored = _calibration_df_to_dataset(cal_df, ds, step_num=5)
 
@@ -304,6 +312,10 @@ class TestCalibrationInMemory:
             "is_Presence_Absence_Marker",
             "Feature_Filter_Keep_Reasons",
             "Imputation_Tag_Reasons",
+            "exposure_ratio",
+            "normal_ratio",
+            "control_ratio",
+            "QC_ratio",
             "Detection_Profile",
         ):
             assert column not in restored.matrix.columns

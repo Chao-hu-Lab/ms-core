@@ -21,15 +21,8 @@ def _decision(
     tag_reason_structural: list[bool] | None = None,
     tag_reason_low_overall: list[bool] | None = None,
     unfiltered_keep: list[bool] | None = None,
-    analysis_ratio_matrix: list[list[float]] | None = None,
-    analysis_group_names: list[str] | None = None,
 ) -> FeatureFilterDecisionResult:
     n_features = len(keep_mask)
-    ratio_matrix = (
-        np.array(analysis_ratio_matrix, dtype=float)
-        if analysis_ratio_matrix is not None
-        else np.ones((n_features, 1), dtype=float)
-    )
     return FeatureFilterDecisionResult(
         keep_mask=np.array(keep_mask, dtype=bool),
         stable_keep=np.array(stable_keep or [False] * n_features, dtype=bool),
@@ -53,8 +46,6 @@ def _decision(
             tag_reason_low_overall or [False] * n_features, dtype=bool
         ),
         unfiltered_keep=np.array(unfiltered_keep or [False] * n_features, dtype=bool),
-        analysis_ratio_matrix=ratio_matrix,
-        analysis_group_names=analysis_group_names or ["a"],
         stats={
             "kept_count": int(sum(keep_mask)),
             "deleted_count": int(n_features - sum(keep_mask)),
@@ -72,7 +63,7 @@ def _simple_df(feature_names: list[str]) -> pd.DataFrame:
     )
 
 
-def test_output_emits_three_new_metadata_columns_in_order() -> None:
+def test_output_emits_two_new_metadata_columns_after_marker() -> None:
     df = _simple_df(["f1"])
     group_info = {"groups": {"a": [1]}, "qc_cols": [], "has_qc": False}
 
@@ -84,11 +75,11 @@ def test_output_emits_three_new_metadata_columns_in_order() -> None:
     )
 
     marker_idx = result_df.columns.get_loc("is_Presence_Absence_Marker")
-    assert result_df.columns[marker_idx + 1 : marker_idx + 4].tolist() == [
+    assert result_df.columns[marker_idx + 1 : marker_idx + 3].tolist() == [
         "Feature_Filter_Keep_Reasons",
         "Imputation_Tag_Reasons",
-        "Detection_Profile",
     ]
+    assert "Detection_Profile" not in result_df.columns
 
 
 def test_output_tag_value_uses_decision_imputation_tag_not_legacy_or() -> None:
@@ -165,40 +156,14 @@ def test_output_tag_reasons_token_order_matches_contract() -> None:
     ]
 
 
-def test_output_detection_profile_format_two_decimals_pipe_joined() -> None:
-    df = pd.DataFrame(
-        {
-            "feature": ["Sample_Type", "f1"],
-            "B1": ["b", 10],
-            "A1": ["a", 20],
-            "C1": ["c", 30],
-        }
-    )
-    group_info = {"groups": {"b": [1], "a": [2], "c": [3]}, "qc_cols": [], "has_qc": False}
-
-    result_df, _, _ = FeatureFilterOutputBuilder().build(
-        df,
-        group_info,
-        _decision(
-            [True],
-            analysis_ratio_matrix=[[0.42, 0.35, 0.2]],
-            analysis_group_names=["b", "a", "c"],
-        ),
-        protected_rows=set(),
-    )
-
-    assert result_df["Detection_Profile"].tolist() == [
-        "Detection_Profile",
-        "b=0.42|a=0.35|c=0.20",
-    ]
-
-
-def test_output_qc_column_does_not_appear_in_detection_profile() -> None:
+def test_output_preserves_numeric_ratio_columns_as_detection_source_of_truth() -> None:
     df = pd.DataFrame(
         {
             "feature": ["Sample_Type", "f1"],
             "A1": ["a", 10],
             "QC1": ["qc", 0],
+            "a_ratio": ["na", 1.0],
+            "QC_ratio": ["na", 0.0],
         }
     )
     group_info = {"groups": {"a": [1]}, "qc_cols": [2], "has_qc": True}
@@ -206,27 +171,28 @@ def test_output_qc_column_does_not_appear_in_detection_profile() -> None:
     result_df, _, _ = FeatureFilterOutputBuilder().build(
         df,
         group_info,
-        _decision([True], analysis_ratio_matrix=[[1.0]], analysis_group_names=["a"]),
+        _decision([True]),
         protected_rows=set(),
     )
 
-    assert result_df.at[1, "Detection_Profile"] == "a=1.00"
-    assert "qc" not in result_df.at[1, "Detection_Profile"].lower()
+    assert result_df["a_ratio"].tolist() == ["na", 1.0]
+    assert "Detection_Profile" not in result_df.columns
 
 
-def test_deleted_features_carry_delete_reasons_and_detection_profile_only() -> None:
+def test_deleted_features_carry_delete_reason_and_existing_ratio_columns_only() -> None:
     df = _simple_df(["deleted"])
     group_info = {"groups": {"a": [1]}, "qc_cols": [], "has_qc": False}
 
     _, deleted_features, _ = FeatureFilterOutputBuilder().build(
         df,
         group_info,
-        _decision([False], analysis_ratio_matrix=[[0.18]], analysis_group_names=["a"]),
+        _decision([False]),
         protected_rows=set(),
     )
 
     assert deleted_features[0]["Feature_Filter_Delete_Reasons"] == "no_keep_rule"
-    assert deleted_features[0]["Detection_Profile"] == "a=0.18"
+    assert deleted_features[0]["a_ratio"] == 1.0
+    assert "Detection_Profile" not in deleted_features[0].index
     assert "Feature_Filter_Keep_Reasons" not in deleted_features[0].index
     assert "Imputation_Tag_Reasons" not in deleted_features[0].index
 
@@ -243,8 +209,6 @@ def test_deleted_features_capture_qc_force_delete_reason() -> None:
             stable_keep=[True],
             qc_zero=[True],
             qc_force_delete=[True],
-            analysis_ratio_matrix=[[1.0]],
-            analysis_group_names=["a"],
         ),
         protected_rows=set(),
     )
@@ -263,8 +227,6 @@ def test_deleted_features_capture_qc_and_no_keep_rule_combined_reason() -> None:
             [False],
             qc_low=[True],
             qc_force_delete=[True],
-            analysis_ratio_matrix=[[0.18]],
-            analysis_group_names=["a"],
         ),
         protected_rows=set(),
     )
@@ -323,7 +285,6 @@ def test_deleted_features_preserve_expected_row_shape() -> None:
     assert deleted_features[0].index.tolist() == [
         *df.columns.tolist(),
         "Feature_Filter_Delete_Reasons",
-        "Detection_Profile",
     ]
     assert deleted_features[0]["feature"] == "deleted"
 

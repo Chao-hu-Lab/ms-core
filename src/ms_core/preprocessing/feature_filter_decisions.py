@@ -47,8 +47,6 @@ class FeatureFilterDecisionResult:
     tag_reason_structural: np.ndarray
     tag_reason_low_overall: np.ndarray
     unfiltered_keep: np.ndarray
-    analysis_ratio_matrix: np.ndarray
-    analysis_group_names: list[str]
     stats: dict[str, Any]
 
 
@@ -287,7 +285,5 @@ class FeatureFilterDecisionTable:
             tag_reason_structural=tag_reason_structural,
             tag_reason_low_overall=tag_reason_low_overall,
             unfiltered_keep=unfiltered_keep,
-            analysis_ratio_matrix=ratio_matrix,
-            analysis_group_names=group_names,
             stats=stats,
         )

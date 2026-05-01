@@ -60,18 +60,11 @@ class FeatureFilterOutputBuilder:
         mnar_col: list[object] = ["is_Presence_Absence_Marker"]
         keep_reasons_col: list[object] = ["Feature_Filter_Keep_Reasons"]
         tag_reasons_col: list[object] = ["Imputation_Tag_Reasons"]
-        detection_profile_col: list[object] = ["Detection_Profile"]
         for orig_row_idx in rows_to_keep[1:]:
             feature_pos = orig_row_idx - 1
             mnar_col.append(bool(decision.imputation_tag[feature_pos]))
             keep_reasons_col.append(self._compose_keep_reasons(decision, feature_pos))
             tag_reasons_col.append(self._compose_tag_reasons(decision, feature_pos))
-            detection_profile_col.append(
-                self._compose_detection_profile(
-                    decision.analysis_ratio_matrix[feature_pos],
-                    decision.analysis_group_names,
-                )
-            )
         marker_idx = len(result_df.columns)
         result_df.insert(marker_idx, "is_Presence_Absence_Marker", mnar_col)
         result_df.insert(
@@ -84,7 +77,6 @@ class FeatureFilterOutputBuilder:
             "Imputation_Tag_Reasons",
             tag_reasons_col,
         )
-        result_df.insert(marker_idx + 3, "Detection_Profile", detection_profile_col)
 
         zeros_converted = self._convert_sample_zeros_to_nan(
             result_df,
@@ -121,16 +113,6 @@ class FeatureFilterOutputBuilder:
         ]
         return "|".join(tokens)
 
-    @staticmethod
-    def _compose_detection_profile(
-        ratio_row: np.ndarray,
-        group_names: list[str],
-    ) -> str:
-        return "|".join(
-            f"{group_name}={float(ratio):.2f}"
-            for group_name, ratio in zip(group_names, ratio_row, strict=True)
-        )
-
     @classmethod
     def _with_deleted_diagnostics(
         cls,
@@ -141,10 +123,6 @@ class FeatureFilterOutputBuilder:
         row["Feature_Filter_Delete_Reasons"] = cls._compose_delete_reasons(
             decision,
             feature_pos,
-        )
-        row["Detection_Profile"] = cls._compose_detection_profile(
-            decision.analysis_ratio_matrix[feature_pos],
-            decision.analysis_group_names,
         )
         return row
 
