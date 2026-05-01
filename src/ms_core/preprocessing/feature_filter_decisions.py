@@ -40,13 +40,20 @@ class FeatureFilterDecisionResult:
     qc_zero: np.ndarray
     qc_low: np.ndarray
     qc_force_delete: np.ndarray
+    all_groups_pass_background: np.ndarray
+    any_group_zero: np.ndarray
+    any_group_nonzero: np.ndarray
+    imputation_tag: np.ndarray
+    tag_reason_structural: np.ndarray
+    tag_reason_low_overall: np.ndarray
+    unfiltered_keep: np.ndarray
     stats: dict[str, Any]
 
 
 class FeatureFilterDecisionTable:
     """Apply Step4 feature keep/delete gates without shaping output rows."""
 
-    _SMALL_N_THRESHOLD: int = 10
+    _RATIO_RESCUE_MIN_DETECTION: float = 0.10
 
     def decide(
         self,
@@ -75,6 +82,10 @@ class FeatureFilterDecisionTable:
         }
 
         group_names = list(group_info["groups"].keys())
+        n_analysis_groups = len(group_names)
+        if n_analysis_groups == 0:
+            raise ValueError("Feature filtering requires at least one analysis group")
+
         has_qc = group_info["has_qc"]
         qc_ratio_col = ratio_cols.get("QC")
         n_features = len(df) - 1
@@ -113,15 +124,13 @@ class FeatureFilterDecisionTable:
             qc_zero = np.zeros(n_features, dtype=bool)
             qc_low = np.zeros(n_features, dtype=bool)
 
-        if ratio_matrix.shape[1] > 0:
-            effective_matrix = ratio_matrix.copy()
-            for j, group_name in enumerate(group_names):
-                n_group = len(group_info["groups"][group_name])
-                if n_group < self._SMALL_N_THRESHOLD:
-                    effective_matrix[:, j] = self.wilson_lower_vec(ratio_matrix[:, j], n_group)
+        all_groups_pass_background = (ratio_matrix >= thresholds.background).all(axis=1)
+        any_group_zero = (ratio_matrix == 0.0).any(axis=1)
+        any_group_nonzero = (ratio_matrix > 0.0).any(axis=1)
 
+        if ratio_matrix.shape[1] > 0:
             mnar_keep = (
-                (effective_matrix >= thresholds.high_det).any(axis=1)
+                (ratio_matrix >= thresholds.high_det).any(axis=1)
                 & (ratio_matrix <= thresholds.low_det).any(axis=1)
                 if (options.enable_mnar and ratio_matrix.shape[1] >= 2)
                 else np.zeros(n_features, dtype=bool)
@@ -131,9 +140,7 @@ class FeatureFilterDecisionTable:
                 required_groups = (
                     1 if (options.allow_single_group_stable and n_groups == 1) else 2
                 )
-                stable_keep = (
-                    (effective_matrix >= thresholds.background).sum(axis=1) >= required_groups
-                )
+                stable_keep = (ratio_matrix >= thresholds.background).sum(axis=1) >= required_groups
             else:
                 stable_keep = np.zeros(n_features, dtype=bool)
         else:
@@ -169,7 +176,7 @@ class FeatureFilterDecisionTable:
                     detection_min > 0, detection_max / detection_min, 0.0
                 )
             ratio_rescue_keep = (det_ratio >= thresholds.ratio_rescue) & (
-                detection_min > thresholds.low_det
+                detection_min >= self._RATIO_RESCUE_MIN_DETECTION
             )
         else:
             ratio_rescue_keep = np.zeros(n_features, dtype=bool)
@@ -177,7 +184,8 @@ class FeatureFilterDecisionTable:
         positive_rules = []
         if options.enable_background:
             positive_rules.append(stable_keep)
-        positive_rules.append(mnar_keep)
+        if options.enable_mnar:
+            positive_rules.append(mnar_keep)
         if options.enable_intensity_fc:
             positive_rules.append(intensity_fc_keep)
         if options.enable_ratio_rescue:
@@ -192,6 +200,20 @@ class FeatureFilterDecisionTable:
             (qc_zero | qc_low) & ~protected_mask & ~mnar_keep & ~ratio_rescue_keep
         )
         keep_mask = np.where(qc_force_delete, False, keep_mask)
+
+        structural_absence_applies = (
+            any_group_zero & any_group_nonzero
+            if n_analysis_groups >= 2
+            else np.zeros(n_features, dtype=bool)
+        )
+        model_imputable = all_groups_pass_background & ~structural_absence_applies
+        imputation_tag = ~model_imputable
+        tag_reason_structural = structural_absence_applies & keep_mask
+        tag_reason_low_overall = ~all_groups_pass_background & keep_mask
+        positive_keep_reason = (
+            stable_keep | mnar_keep | intensity_fc_keep | ratio_rescue_keep
+        )
+        unfiltered_keep = keep_mask & ~protected_mask & ~positive_keep_reason
 
         non_protected = ~protected_mask
         effective = non_protected & ~qc_force_delete
@@ -256,16 +278,12 @@ class FeatureFilterDecisionTable:
             qc_zero=qc_zero,
             qc_low=qc_low,
             qc_force_delete=qc_force_delete,
+            all_groups_pass_background=all_groups_pass_background,
+            any_group_zero=any_group_zero,
+            any_group_nonzero=any_group_nonzero,
+            imputation_tag=imputation_tag,
+            tag_reason_structural=tag_reason_structural,
+            tag_reason_low_overall=tag_reason_low_overall,
+            unfiltered_keep=unfiltered_keep,
             stats=stats,
         )
-
-    @staticmethod
-    def wilson_lower_vec(p: np.ndarray, n: int, z: float = 1.96) -> np.ndarray:
-        """Return the 95% Wilson CI lower bound for each proportion in *p*."""
-        if n == 0:
-            return np.zeros_like(p, dtype=float)
-        z2 = z * z
-        n_f = float(n)
-        numerator = p + z2 / (2 * n_f) - z * np.sqrt(p * (1 - p) / n_f + z2 / (4 * n_f * n_f))
-        denominator = 1.0 + z2 / n_f
-        return np.clip(numerator / denominator, 0.0, 1.0)

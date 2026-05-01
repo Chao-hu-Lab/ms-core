@@ -1,47 +1,8 @@
-"""Tests for Wilson CI correction in FeatureFilter."""
+"""Tests for small-N observed detection-ratio behavior in FeatureFilter."""
 
 from __future__ import annotations
-import numpy as np
 import pandas as pd
 from ms_core.preprocessing.ms_quality_filter import FeatureFilter
-
-
-# ── Wilson CI helper tests ──────────────────────────────────────────
-
-
-def test_wilson_lower_large_n_is_close_to_p() -> None:
-    ff = FeatureFilter()
-    p = np.array([0.8])
-    result = ff._wilson_lower_vec(p, n=1000)
-    # Wilson lower for p=0.8, N=1000 ≈ 0.774; tolerance 0.03 confirms it is
-    # close to the raw proportion but allows for the expected conservative bias.
-    assert abs(float(result[0]) - 0.8) < 0.03
-
-
-def test_wilson_lower_small_n_is_significantly_below_p() -> None:
-    ff = FeatureFilter()
-    p = np.array([0.8])
-    result = ff._wilson_lower_vec(p, n=5)
-    # Wilson lower for 4/5 ≈ 0.37
-    assert float(result[0]) < 0.5
-
-
-def test_wilson_lower_clamps_to_zero() -> None:
-    ff = FeatureFilter()
-    result = ff._wilson_lower_vec(np.array([0.0]), n=5)
-    assert float(result[0]) >= 0.0
-
-
-def test_wilson_lower_clamps_to_one() -> None:
-    ff = FeatureFilter()
-    result = ff._wilson_lower_vec(np.array([1.0]), n=100)
-    assert float(result[0]) <= 1.0
-
-
-def test_wilson_lower_zero_n_returns_zeros() -> None:
-    ff = FeatureFilter()
-    result = ff._wilson_lower_vec(np.array([0.5, 0.8]), n=0)
-    np.testing.assert_array_equal(result, np.zeros(2))
 
 
 # ── Helper to build minimal FeatureFilter-ready DataFrame ──────────
@@ -70,8 +31,8 @@ def _make_two_group_df(
 # ── Stable gate tests ───────────────────────────────────────────────
 
 
-def test_stable_gate_small_n_rejects_4_of_5() -> None:
-    """4/5 = 80% should NOT pass 80% threshold for N=5 after Wilson CI."""
+def test_stable_gate_small_n_uses_observed_ratio() -> None:
+    """4/5 = 80% passes an 80% threshold because Step4 uses observed ratios."""
     df = _make_two_group_df(n_a=5, present_a=4, n_b=5, present_b=4)
     ff = FeatureFilter()
     result = ff.process(
@@ -82,12 +43,11 @@ def test_stable_gate_small_n_rejects_4_of_5() -> None:
         enable_mnar_gate=False,
     )
     assert result.success
-    # Wilson lower for 4/5 ≈ 0.37 < 0.8 → deleted
-    assert result.statistics["kept_count"] == 0
+    assert result.statistics["kept_count"] == 1
 
 
 def test_stable_gate_large_n_accepts_raw_ratio() -> None:
-    """16/20 = 80% should pass 80% threshold for N=20 (no Wilson, raw ratio used)."""
+    """16/20 = 80% should pass 80% threshold with the same observed-ratio rule."""
     df = _make_two_group_df(n_a=20, present_a=16, n_b=20, present_b=16)
     ff = FeatureFilter()
     result = ff.process(
@@ -98,7 +58,6 @@ def test_stable_gate_large_n_accepts_raw_ratio() -> None:
         enable_mnar_gate=False,
     )
     assert result.success
-    # N=20 → no Wilson CI → raw ratio 0.8 >= 0.8 → kept
     assert result.statistics["kept_count"] == 1
 
 

@@ -40,8 +40,6 @@ class FeatureFilter(BaseProcessor):
     4. Removes features with QC_ratio = 0 or below threshold
     """
 
-    _SMALL_N_THRESHOLD: int = 10
-
     def __init__(self, config: Optional[FeatureFilterConfig] = None):
         """
         Initialize the Feature Filter.
@@ -102,9 +100,10 @@ class FeatureFilter(BaseProcessor):
             qc_ratio_threshold: Minimum QC_ratio to keep a feature (0-1)
             intensity_fc_threshold: Minimum fold-change of group mean intensities (>=1)
             ratio_rescue_threshold: Minimum max/min detection-rate ratio to rescue
-                a feature whose minimum group detection rate exceeds low_det_thresh
-                (>=1, default 2.0). Rescued features are also marked as
-                is_Presence_Absence_Marker=True and bypass QC force-delete.
+                a feature whose minimum group detection rate is at least 10%
+                (>=1, default 2.0). Rescued features bypass QC force-delete.
+                is_Presence_Absence_Marker is computed separately from the
+                analysis-group detection profile.
             enable_background_threshold: Whether to apply stable feature rule
             enable_qc_ratio_threshold: Whether to apply QC-based deletion rules
             enable_intensity_fc_threshold: Whether to apply intensity fold-change rule
@@ -354,20 +353,6 @@ class FeatureFilter(BaseProcessor):
             numeric_block,
         )
         return FeatureFilterOutputBuilder().build(df, group_info, decision, protected_rows)
-
-    @staticmethod
-    def _wilson_lower_vec(p: np.ndarray, n: int, z: float = 1.96) -> np.ndarray:
-        """Return the 95% Wilson CI lower bound for each proportion in *p*.
-
-        Args:
-            p: Array of observed proportions in [0, 1].
-            n: Sample size (integer).  When 0, returns an all-zero array.
-            z: Z-score for the desired confidence level (default 1.96 → 95%).
-
-        Returns:
-            Array of lower-bound proportions, clipped to [0, 1].
-        """
-        return FeatureFilterDecisionTable.wilson_lower_vec(p, n, z)
 
     def _get_max_ratio_diff(self, ratios: List[float]) -> float:
         """Calculate maximum difference between any two ratios."""

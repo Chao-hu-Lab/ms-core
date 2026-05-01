@@ -100,13 +100,20 @@ NON_SAMPLE_COLUMNS = {
     'Frac_Strategy',
     # Additional metadata columns
     'mz', 'rt', 'm/z', 'Mass', 'Retention_Time',
+    # Step4 feature-filter metadata columns
+    'is_Presence_Absence_Marker',
+    'Feature_Filter_Keep_Reasons',
+    'Imputation_Tag_Reasons',
+    # Legacy display-only Step4 metadata; no longer emitted as a formal contract.
+    'Detection_Profile',
+    'Feature_Filter_Delete_Reasons',
 }
 
 # Keywords that identify derived statistical columns
 STAT_COLUMN_KEYWORDS = (
     'original_qc_', 'corrected_qc_', 'cv_', 'variance_', 'levene', 'mk_',
     'kendall', 'lowess_', 'trend_', 'wilcoxon', 'shapiro', 'significant',
-    'decision', 'rmse', 'median_correction', 'correction_factor'
+    'decision', 'rmse', 'median_correction', 'correction_factor', '_ratio'
 )
 
 # ========== Sample Type Aliases ==========

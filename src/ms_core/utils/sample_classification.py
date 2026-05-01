@@ -269,6 +269,9 @@ def identify_sample_columns(
     # Normalize non-sample column names
     non_sample_lower = {normalize_sample_name(col) for col in NON_SAMPLE_COLUMNS}
 
+    def is_derived_column(col_norm: str) -> bool:
+        return any(keyword in col_norm for keyword in STAT_COLUMN_KEYWORDS)
+
     sample_columns = []
     dropped_columns = []
 
@@ -284,7 +287,7 @@ def identify_sample_columns(
             sample_columns.append(col)
         else:
             # Check for statistical column patterns
-            if any(keyword in col_norm for keyword in STAT_COLUMN_KEYWORDS):
+            if is_derived_column(col_norm):
                 dropped_columns.append(col)
 
     # Fallback: if no matches, use all non-metadata columns
@@ -292,6 +295,7 @@ def identify_sample_columns(
         sample_columns = [
             col for col in df.columns
             if normalize_sample_name(col) not in non_sample_lower
+            and not is_derived_column(normalize_sample_name(col))
         ]
 
     return sample_columns, dropped_columns

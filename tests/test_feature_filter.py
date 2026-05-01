@@ -5,6 +5,25 @@ import pytest
 from ms_core.preprocessing.ms_quality_filter import FeatureFilter
 
 
+def _make_detection_ratio_df(
+    patterns: list[tuple[float, float, float]],
+    *,
+    total_per_group: int = 100,
+) -> pd.DataFrame:
+    data: dict[str, list[object]] = {
+        "Mz/RT": ["Sample_Type"] + [f"{100 + i:.3f}/{i + 1:.1f}" for i in range(len(patterns))],
+        "Tolerance": ["na"] * (len(patterns) + 1),
+    }
+    for group_index, group_name in enumerate(("A", "B", "C")):
+        for sample_index in range(total_per_group):
+            values: list[object] = [group_name.lower()]
+            for pattern in patterns:
+                detected = int(round(pattern[group_index] * total_per_group))
+                values.append(8000 if sample_index < detected else 0)
+            data[f"{group_name}{sample_index + 1}"] = values
+    return pd.DataFrame(data)
+
+
 class TestFeatureFilter:
     """Test cases for FeatureFilter."""
 
@@ -612,6 +631,77 @@ class TestFeatureFilter:
 
         assert result.success
         assert "is_Presence_Absence_Marker" in result.data.columns
+        marker_idx = result.data.columns.get_loc("is_Presence_Absence_Marker")
+        assert result.data.columns[marker_idx + 1 : marker_idx + 3].tolist() == [
+            "Feature_Filter_Keep_Reasons",
+            "Imputation_Tag_Reasons",
+        ]
+        assert "Detection_Profile" not in result.data.columns
+
+    def test_contract_flip_ratio_rescue_can_route_to_model_imputable_false_tag(
+        self, filter_proc
+    ):
+        df = _make_detection_ratio_df([(0.42, 0.35, 0.20)])
+
+        result = filter_proc.process(
+            df,
+            background_threshold=0.20,
+            high_det_thresh=0.30,
+            low_det_thresh=0.10,
+            ratio_rescue_threshold=2.0,
+            enable_qc_ratio_threshold=False,
+        )
+
+        assert result.success
+        feature_row = result.data[result.data["Mz/RT"] == "100.000/1.0"]
+        assert not feature_row.empty
+        assert "ratio_rescue" in feature_row["Feature_Filter_Keep_Reasons"].iloc[0]
+        # CONTRACT_FLIP: legacy mnar OR ratio_rescue tag was True; contract tag is False.
+        assert bool(feature_row["is_Presence_Absence_Marker"].iloc[0]) is False
+
+    def test_contract_flip_marginal_stable_routes_to_presence_absence_tag(
+        self, filter_proc
+    ):
+        df = _make_detection_ratio_df([(0.25, 0.22, 0.18)])
+
+        result = filter_proc.process(
+            df,
+            background_threshold=0.20,
+            high_det_thresh=0.30,
+            low_det_thresh=0.10,
+            ratio_rescue_threshold=2.0,
+            enable_qc_ratio_threshold=False,
+        )
+
+        assert result.success
+        feature_row = result.data[result.data["Mz/RT"] == "100.000/1.0"]
+        assert not feature_row.empty
+        assert feature_row["Feature_Filter_Keep_Reasons"].iloc[0] == "stable"
+        # CONTRACT_FLIP: legacy mnar OR ratio_rescue tag was False; contract tag is True.
+        assert bool(feature_row["is_Presence_Absence_Marker"].iloc[0]) is True
+        assert feature_row["Imputation_Tag_Reasons"].iloc[0] == "low_overall_detection"
+
+    def test_deleted_feature_rows_include_contract_diagnostics(self, filter_proc):
+        df = _make_detection_ratio_df([(0.18, 0.18, 0.18)])
+
+        result = filter_proc.process(
+            df,
+            background_threshold=0.20,
+            high_det_thresh=0.30,
+            low_det_thresh=0.10,
+            ratio_rescue_threshold=2.0,
+            enable_qc_ratio_threshold=False,
+        )
+
+        assert result.success
+        assert result.data["Mz/RT"].tolist() == ["Sample_Type"]
+        deleted = result.metadata["deleted_features"][0]
+        assert deleted["Mz/RT"] == "100.000/1.0"
+        assert deleted["Feature_Filter_Delete_Reasons"] == "no_keep_rule"
+        assert deleted["a_ratio"] == pytest.approx(0.18)
+        assert deleted["b_ratio"] == pytest.approx(0.18)
+        assert deleted["c_ratio"] == pytest.approx(0.18)
+        assert "Detection_Profile" not in deleted.index
 
     def test_mnar_feature_is_marked_true_in_output(self, filter_proc):
         """A feature that passes the MNAR 80/20 rule must have is_Presence_Absence_Marker=True."""
@@ -940,3 +1030,19 @@ class TestFeatureFilter:
         result = filter_proc.process(df, enable_ratio_rescue=False, ratio_rescue_threshold=3.0)
         assert result.metadata["enabled_thresholds"]["ratio_rescue"] is False
         assert result.metadata["thresholds"]["ratio_rescue"] == 3.0
+
+    def test_ratio_rescue_default_threshold_is_two(self, filter_proc):
+        """Direct core Step4 defaults stay independent from toolkit YAML profiles."""
+        df = pd.DataFrame(
+            {
+                "Mz/RT": ["Sample_Type", "100.000/1.0"],
+                "Tolerance": ["na", "na"],
+                "Case1": ["case", 8000],
+                "Control1": ["control", 8000],
+                "QC1": ["qc", 8000],
+            }
+        )
+
+        result = filter_proc.process(df)
+
+        assert result.metadata["thresholds"]["ratio_rescue"] == 2.0
